@@ -1,0 +1,59 @@
+{
+  "name": "sql-connect",
+  "version": "0.1.0",
+  "description": "A focused SQLite desktop client for macOS",
+  "main": "out/main/index.js",
+  "author": "SQL Connect",
+  "license": "MIT",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "preview": "electron-vite preview",
+    "dist": "npm run build && electron-builder --mac --arm64",
+    "dist:dir": "npm run build && electron-builder --mac --arm64 --dir",
+    "dist:zip": "npm run build && electron-builder --mac --arm64 --config.mac.target=zip",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@codemirror/lang-sql": "^6.8.0",
+    "@uiw/react-codemirror": "^4.23.10",
+    "better-sqlite3": "^13.0.3",
+    "lucide-react": "^0.468.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.4",
+    "electron": "^36.3.2",
+    "electron-builder": "^26.0.12",
+    "electron-vite": "^3.1.0",
+    "typescript": "^5.7.2",
+    "vite": "^6.0.5"
+  },
+  "build": {
+    "appId": "com.sqlconnect.app",
+    "productName": "SQL Connect",
+    "asar": true,
+    "files": [
+      "out",
+      "src/main/db/worker.cjs",
+      "package.json"
+    ],
+    "mac": {
+      "target": [
+        "dmg"
+      ],
+      "category": "public.app-category.developer-tools",
+      "artifactName": "SQL-Connect-${version}-${arch}.${ext}"
+    },
+    "npmRebuild": true
+  },
+  "allowScripts": {
+    "electron@36.9.5": true,
+    "electron-winstaller@5.4.0": true,
+    "esbuild@0.25.12": true
+  }
+}
