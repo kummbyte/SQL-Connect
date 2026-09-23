@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react'
+import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import CodeMirror from '@uiw/react-codemirror'
 import { sql as sqlLanguage } from '@codemirror/lang-sql'
@@ -9,6 +9,7 @@ import './styles.css'
 
 type Tab = { id: string; kind: 'table' | 'structure' | 'query'; title: string; table?: string; sql?: string }
 type Toast = { type: 'success' | 'error' | 'info'; text: string }
+type ContextMenu = { x: number; y: number; tabId: string }
 
 const uid = () => crypto.randomUUID()
 const formatValue = (value: unknown) => value === null ? 'NULL' : typeof value === 'object' ? JSON.stringify(value) : String(value)
@@ -19,8 +20,10 @@ function App() {
   const [schema, setSchema] = useState<Record<string, TableInfo[]>>({})
   const [expanded, setExpanded] = useState<Record<string, boolean>>({})
   const [tabs, setTabs] = useState<Tab[]>([])
+  const tabsRef = useRef<Tab[]>([])
   const [activeTab, setActiveTab] = useState<string | null>(null)
   const [sqlText, setSqlText] = useState('SELECT name, type FROM sqlite_master WHERE type IN (\'table\', \'view\') ORDER BY type, name;')
+  const [sqlByTab, setSqlByTab] = useState<Record<string, string>>({})
   const [results, setResults] = useState<Record<string, QueryResult>>({})
   const [structures, setStructures] = useState<Record<string, Structure>>({})
   const [pending, setPending] = useState<Record<string, PendingChange[]>>({})
@@ -30,10 +33,22 @@ function App() {
   const [filter, setFilter] = useState('')
   const [page, setPage] = useState(0)
   const [sort, setSort] = useState<{ column?: string; direction?: 'asc' | 'desc' }>({})
+  const [contextMenu, setContextMenu] = useState<ContextMenu | null>(null)
 
   useEffect(() => { window.sqlConnect.settings.load().then(setConnections); const saved = localStorage.getItem('sql-connect-theme') as 'dark' | 'light' | null; if (saved) setTheme(saved) }, [])
   useEffect(() => { document.documentElement.dataset.theme = theme; localStorage.setItem('sql-connect-theme', theme) }, [theme])
   useEffect(() => { if (toast) { const timer = setTimeout(() => setToast(null), 3800); return () => clearTimeout(timer) } }, [toast])
+  useEffect(() => { tabsRef.current = tabs }, [tabs])
+  useEffect(() => {
+    if (!contextMenu) return
+    const close = () => setContextMenu(null)
+    const onKeyDown = (event: KeyboardEvent) => { if (event.key === 'Escape') close() }
+    window.addEventListener('mousedown', close)
+    window.addEventListener('blur', close)
+    window.addEventListener('keydown', onKeyDown)
+    document.addEventListener('scroll', close, true)
+    return () => { window.removeEventListener('mousedown', close); window.removeEventListener('blur', close); window.removeEventListener('keydown', onKeyDown); document.removeEventListener('scroll', close, true) }
+  }, [contextMenu])
   const active = tabs.find(t => t.id === activeTab)
   const activeConnection = active?.id.split(':')[0] || connected[0] || ''
 
@@ -48,22 +63,58 @@ function App() {
     await connect(item)
   }
   async function connect(item: Connection) { setLoading(true); try { await window.sqlConnect.db.connect(item); setConnected(v => [...new Set([...v, item.id])]); const items = await window.sqlConnect.db.schema(item.id); setSchema(v => ({ ...v, [item.id]: items })); setExpanded(v => ({ ...v, [item.id]: true })); const saved = { ...item }; delete saved.create; setConnections(v => v.some(c => c.id === saved.id) ? v.map(c => c.id === saved.id ? saved : c) : [...v, saved]); void window.sqlConnect.settings.save(connections.some(c => c.id === saved.id) ? connections.map(c => c.id === saved.id ? saved : c) : [...connections, saved]); notify(`已连接 ${item.name}`, 'success') } catch (error) { notify(error instanceof Error ? error.message : String(error), 'error') } finally { setLoading(false) } }
-  async function disconnect(id: string) { await window.sqlConnect.db.disconnect(id); setConnected(v => v.filter(item => item !== id)); setSchema(v => { const copy = { ...v }; delete copy[id]; return copy }); setTabs(v => v.filter(t => !t.id.startsWith(`${id}:`))); notify('连接已断开') }
+  async function disconnect(id: string) { await window.sqlConnect.db.disconnect(id); setConnected(v => v.filter(item => item !== id)); setSchema(v => { const copy = { ...v }; delete copy[id]; return copy }); setTabs(v => { const next = v.filter(t => !t.id.startsWith(`${id}:`)); tabsRef.current = next; return next }); setSqlByTab(v => Object.fromEntries(Object.entries(v).filter(([tabId]) => !tabId.startsWith(`${id}:`)))); setActiveTab(current => current?.startsWith(`${id}:`) ? null : current); notify('连接已断开') }
   async function openTable(connectionId: string, item: TableInfo, kind: Tab['kind'] = 'table') {
-    const id = `${connectionId}:${kind}:${item.name}`; setTabs(v => v.some(t => t.id === id) ? v : [...v, { id, kind, title: item.name, table: item.name }]); setActiveTab(id); setPage(0); setFilter('')
-    if (kind === 'structure') { if (!structures[id]) setStructures(v => ({ ...v, [id]: undefined as never })); try { const structure = await window.sqlConnect.db.structure(connectionId, item.name); setStructures(v => ({ ...v, [id]: structure })) } catch (error) { notify(error instanceof Error ? error.message : String(error), 'error') } }
+    const id = `${connectionId}:${kind}:${item.name}`; const nextTab = { id, kind, title: item.name, table: item.name } as Tab; setTabs(v => { const next = v.some(t => t.id === id) ? v : [...v, nextTab]; tabsRef.current = next; return next }); setActiveTab(id); setPage(0); setFilter('')
+    if (kind === 'structure') { if (!structures[id]) setStructures(v => ({ ...v, [id]: undefined as never })); try { const structure = await window.sqlConnect.db.structure(connectionId, item.name); if (tabsRef.current.some(t => t.id === id)) setStructures(v => ({ ...v, [id]: structure })) } catch (error) { notify(error instanceof Error ? error.message : String(error), 'error') } }
     else await refreshTable(connectionId, item.name, id)
   }
-  async function refreshTable(connectionId: string, table: string, tabId = activeTab || '') { setLoading(true); try { const data = await window.sqlConnect.db.query(connectionId, table, { offset: page * 100, limit: 100, orderBy: sort.column, direction: sort.direction, filter }); setResults(v => ({ ...v, [tabId]: data })) } catch (error) { notify(error instanceof Error ? error.message : String(error), 'error') } finally { setLoading(false) } }
-  async function runSql(sqlOverride?: string) { const text = (sqlOverride ?? sqlText).trim(); if (!text || !activeConnection) return; const id = `${activeConnection}:query:${uid()}`; const title = text.split(/\s+/).slice(0, 4).join(' '); setTabs(v => [...v, { id, kind: 'query', title, sql: text }]); setActiveTab(id); setLoading(true); try { const data = await window.sqlConnect.db.execute(activeConnection, text); setResults(v => ({ ...v, [id]: data })); notify(data.changes !== undefined ? `执行成功，影响 ${data.changes} 行` : `查询完成，用时 ${data.elapsedMs} ms`, 'success') } catch (error) { notify(error instanceof Error ? error.message : String(error), 'error') } finally { setLoading(false) } }
+  async function refreshTable(connectionId: string, table: string, tabId = activeTab || '') { setLoading(true); try { const data = await window.sqlConnect.db.query(connectionId, table, { offset: page * 100, limit: 100, orderBy: sort.column, direction: sort.direction, filter }); if (tabsRef.current.some(t => t.id === tabId)) setResults(v => ({ ...v, [tabId]: data })) } catch (error) { notify(error instanceof Error ? error.message : String(error), 'error') } finally { setLoading(false) } }
+  async function runSql(sqlOverride?: string) { const text = (sqlOverride ?? sqlText).trim(); if (!text || !activeConnection) return; const id = `${activeConnection}:query:${uid()}`; const title = text.split(/\s+/).slice(0, 4).join(' '); const queryTab = { id, kind: 'query' as const, title, sql: text }; setTabs(v => { const next = [...v, queryTab]; tabsRef.current = next; return next }); setSqlByTab(v => ({ ...v, [id]: text })); setActiveTab(id); setLoading(true); try { const data = await window.sqlConnect.db.execute(activeConnection, text); if (tabsRef.current.some(t => t.id === id)) setResults(v => ({ ...v, [id]: data })); notify(data.changes !== undefined ? `执行成功，影响 ${data.changes} 行` : `查询完成，用时 ${data.elapsedMs} ms`, 'success') } catch (error) { notify(error instanceof Error ? error.message : String(error), 'error') } finally { setLoading(false) } }
   function updateCell(tabId: string, row: Record<string, unknown>, column: string, value: string) { const tab = tabs.find(t => t.id === tabId); if (!tab?.table) return; const key = String(row.__sqlconnect_rowid ?? JSON.stringify(row)); setResults(v => ({ ...v, [tabId]: { ...v[tabId], rows: v[tabId].rows.map(r => String(r.__sqlconnect_rowid ?? JSON.stringify(r)) === key ? { ...r, [column]: value } : r) } })); setPending(v => ({ ...v, [tabId]: [...(v[tabId] || []).filter(c => !(c.type === 'update' && String(c.rowid) === String(row.__sqlconnect_rowid))), { type: 'update', table: tab.table!, rowid: row.__sqlconnect_rowid as string | number, values: { [column]: value }, original: { [column]: row[column] } }] })) }
   function addRow(tabId: string) { const tab = tabs.find(t => t.id === tabId); const result = results[tabId]; if (!tab?.table || !result) return; const row = Object.fromEntries(result.columns.filter(c => c !== '__sqlconnect_rowid').map(c => [c, null])); setResults(v => ({ ...v, [tabId]: { ...v[tabId], rows: [...v[tabId].rows, row] } })); setPending(v => ({ ...v, [tabId]: [...(v[tabId] || []), { type: 'insert', table: tab.table!, values: row }] })) }
   function deleteRow(tabId: string, row: Record<string, unknown>) { const tab = tabs.find(t => t.id === tabId); if (!tab?.table) return; setResults(v => ({ ...v, [tabId]: { ...v[tabId], rows: v[tabId].rows.filter(r => r !== row) } })); setPending(v => ({ ...v, [tabId]: [...(v[tabId] || []), { type: 'delete', table: tab.table!, rowid: row.__sqlconnect_rowid as string | number, values: {}, original: row }] })) }
   async function commit(tabId: string) { const changes = pending[tabId] || []; if (!changes.length) return; const connectionId = tabId.split(':')[0]; setLoading(true); try { await window.sqlConnect.db.apply(connectionId, changes); setPending(v => ({ ...v, [tabId]: [] })); notify(`已提交 ${changes.length} 项修改`, 'success'); const tab = tabs.find(t => t.id === tabId); if (tab?.table) await refreshTable(connectionId, tab.table, tabId) } catch (error) { notify(error instanceof Error ? error.message : String(error), 'error') } finally { setLoading(false) } }
   function discard(tabId: string) { setPending(v => ({ ...v, [tabId]: [] })); const tab = tabs.find(t => t.id === tabId); if (tab?.table) void refreshTable(tabId.split(':')[0], tab.table, tabId) }
+  function closeTabs(ids: string[], preferredId?: string) {
+    const closeIds = new Set(ids)
+    const targetTabs = tabs.filter(tab => closeIds.has(tab.id))
+    if (!targetTabs.length) { setContextMenu(null); return }
+    const dirtyTabs = targetTabs.filter(tab => (pending[tab.id] || []).length > 0)
+    if (dirtyTabs.length > 0) {
+      const names = dirtyTabs.map(tab => `• ${tab.title}`).join('\n')
+      if (!window.confirm(`以下标签有未提交修改，关闭后将放弃：\n${names}\n\n确定放弃修改并关闭吗？`)) { setContextMenu(null); return }
+    }
+    const firstIndex = tabs.findIndex(tab => closeIds.has(tab.id))
+    const remaining = tabs.filter(tab => !closeIds.has(tab.id))
+    const activeWillClose = activeTab ? closeIds.has(activeTab) : false
+    const nextActive = !activeWillClose ? activeTab : preferredId && remaining.some(tab => tab.id === preferredId) ? preferredId : remaining[Math.min(firstIndex, remaining.length - 1)]?.id || remaining[Math.max(0, firstIndex - 1)]?.id || null
+    setTabs(remaining); tabsRef.current = remaining; setActiveTab(nextActive)
+    setResults(current => { const next = { ...current }; closeIds.forEach(id => delete next[id]); return next })
+    setStructures(current => { const next = { ...current }; closeIds.forEach(id => delete next[id]); return next })
+    setPending(current => { const next = { ...current }; closeIds.forEach(id => delete next[id]); return next })
+    setSqlByTab(current => { const next = { ...current }; closeIds.forEach(id => delete next[id]); return next })
+    if (nextActive) { const nextTab = remaining.find(tab => tab.id === nextActive); if (nextTab?.kind === 'query') setSqlText(sqlByTab[nextActive] ?? nextTab.sql ?? '') }
+    setContextMenu(null)
+  }
+  function closeTab(id: string) { closeTabs([id], id) }
+  function openTabContextMenu(event: React.MouseEvent, tabId: string) {
+    event.preventDefault()
+    const width = 190; const height = 136
+    setContextMenu({ tabId, x: Math.max(8, Math.min(event.clientX, window.innerWidth - width - 8)), y: Math.max(8, Math.min(event.clientY, window.innerHeight - height - 8)) })
+  }
+  function contextIds(mode: 'left' | 'right' | 'others') {
+    if (!contextMenu) return []
+    const index = tabs.findIndex(tab => tab.id === contextMenu.tabId)
+    if (index < 0) return []
+    if (mode === 'left') return tabs.slice(0, index).map(tab => tab.id)
+    if (mode === 'right') return tabs.slice(index + 1).map(tab => tab.id)
+    return tabs.filter(tab => tab.id !== contextMenu.tabId).map(tab => tab.id)
+  }
   const result = activeTab ? results[activeTab] : undefined
   const activeChanges = activeTab ? pending[activeTab] || [] : []
-  const newQuery = () => { const connectionId = connected[0]; if (!connectionId) { notify('请先连接一个 SQLite 数据库', 'info'); return } const id = `${connectionId}:query:${uid()}`; setTabs(v => [...v, { id, kind: 'query', title: 'SQL 查询', sql: '' }]); setActiveTab(id); setSqlText('') }
+  const newQuery = () => { const connectionId = connected[0]; if (!connectionId) { notify('请先连接一个 SQLite 数据库', 'info'); return } const id = `${connectionId}:query:${uid()}`; const tab = { id, kind: 'query' as const, title: 'SQL 查询', sql: '' }; setTabs(v => { const next = [...v, tab]; tabsRef.current = next; return next }); setSqlByTab(v => ({ ...v, [id]: '' })); setActiveTab(id); setSqlText('') }
+  const handleSqlChange = (value: string) => { setSqlText(value); if (activeTab) setSqlByTab(v => ({ ...v, [activeTab]: value })) }
 
   return <div className="app-shell">
     <header className="topbar"><div className="brand"><div className="brand-mark"><Database size={18}/></div><span>SQL Connect</span><span className="version">SQLite</span></div><div className="top-actions"><button className="icon-btn" onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')} title="切换主题">{theme === 'dark' ? <Sun size={17}/> : <Moon size={17}/>}</button><button className="icon-btn" title="设置"><Settings2 size={17}/></button></div></header>
@@ -75,11 +126,12 @@ function App() {
         {connections.length > 0 && <div className="sidebar-footer"><button onClick={() => { const item = connections.find(c => connected.includes(c.id)); if (item) void disconnect(item.id) }}><X size={14}/>断开当前连接</button></div>}
       </aside>
       <main className="workspace">
-        <div className="tabbar">{tabs.length === 0 && <div className="tabbar-placeholder">选择一个表，或打开 SQL 查询</div>}{tabs.map(tab => <button className={`tab ${tab.id === activeTab ? 'active' : ''}`} key={tab.id} onClick={() => { setActiveTab(tab.id); if (tab.kind === 'query') setSqlText(tab.sql || '') }}><span className="tab-dot">{tab.kind === 'query' ? <Zap size={12}/> : tab.kind === 'structure' ? <Settings2 size={12}/> : <Table2 size={12}/>}</span><span>{tab.title}</span><X size={13} onClick={(event) => { event.stopPropagation(); if ((pending[tab.id] || []).length && !confirm('当前页面有未提交修改，确定关闭吗？')) return; setTabs(v => v.filter(t => t.id !== tab.id)); if (activeTab === tab.id) setActiveTab(tabs.find(t => t.id !== tab.id)?.id || null) }}/></button>)}<button className="new-query" onClick={newQuery}><Plus size={15}/>SQL</button></div>
-        <div className="content-area">{!active && <Welcome onOpen={() => void addConnection()} onCreate={() => void addConnection(true)} onQuery={newQuery} />}{active?.kind === 'structure' && <StructureView structure={structures[active.id]} />}{active?.kind === 'table' && result && <DataView tab={active} result={result} readonly={connections.find(c => c.id === activeConnection)?.readonly} filter={filter} setFilter={setFilter} page={page} setPage={setPage} sort={sort} setSort={setSort} onRefresh={() => active.table && void refreshTable(activeConnection, active.table)} onEdit={updateCell} onAdd={() => addRow(active.id)} onDelete={deleteRow} changes={activeChanges} onCommit={() => void commit(active.id)} onDiscard={() => discard(active.id)} />}{active?.kind === 'query' && <QueryView sql={sqlText} setSql={setSqlText} onRun={() => void runSql(sqlText)} loading={loading} result={result} />}</div>
+        <div className="tabbar">{tabs.length === 0 && <div className="tabbar-placeholder">选择一个表，或打开 SQL 查询</div>}{tabs.map(tab => <button className={`tab ${tab.id === activeTab ? 'active' : ''}`} key={tab.id} onClick={() => { setActiveTab(tab.id); if (tab.kind === 'query') setSqlText(sqlByTab[tab.id] ?? tab.sql ?? '') }} onContextMenu={event => openTabContextMenu(event, tab.id)}><span className="tab-dot">{tab.kind === 'query' ? <Zap size={12}/> : tab.kind === 'structure' ? <Settings2 size={12}/> : <Table2 size={12}/>}</span><span>{tab.title}</span><X size={13} onClick={(event) => { event.stopPropagation(); closeTab(tab.id) }}/></button>)}<button className="new-query" onClick={newQuery}><Plus size={15}/>SQL</button></div>
+        <div className="content-area">{!active && <Welcome onOpen={() => void addConnection()} onCreate={() => void addConnection(true)} onQuery={newQuery} />}{active?.kind === 'structure' && <StructureView structure={structures[active.id]} />}{active?.kind === 'table' && result && <DataView tab={active} result={result} readonly={connections.find(c => c.id === activeConnection)?.readonly} filter={filter} setFilter={setFilter} page={page} setPage={setPage} sort={sort} setSort={setSort} onRefresh={() => active.table && void refreshTable(activeConnection, active.table)} onEdit={updateCell} onAdd={() => addRow(active.id)} onDelete={deleteRow} changes={activeChanges} onCommit={() => void commit(active.id)} onDiscard={() => discard(active.id)} />}{active?.kind === 'query' && <QueryView sql={sqlText} setSql={handleSqlChange} onRun={() => void runSql(sqlText)} loading={loading} result={result} />}</div>
         <footer className="statusbar"><span><span className={`status-dot ${loading ? 'busy' : ''}`}></span>{loading ? '正在执行…' : activeConnection ? '已就绪' : '未连接数据库'}</span>{activeConnection && <span className="status-path">{connections.find(c => c.id === activeConnection)?.path}</span>}<span className="status-spacer"/><span>UTF-8</span><span>SQL Connect 0.1</span></footer>
       </main>
     </div>
+    {contextMenu && <div className="tab-context-menu" style={{ left: contextMenu.x, top: contextMenu.y }} onMouseDown={event => event.stopPropagation()} onContextMenu={event => event.preventDefault()}><button disabled={!contextIds('left').length} onClick={() => closeTabs(contextIds('left'), contextMenu.tabId)}>关闭左侧窗口</button><button disabled={!contextIds('right').length} onClick={() => closeTabs(contextIds('right'), contextMenu.tabId)}>关闭右侧窗口</button><button disabled={!contextIds('others').length} onClick={() => closeTabs(contextIds('others'), contextMenu.tabId)}>关闭其他窗口</button></div>}
     {toast && <div className={`toast ${toast.type}`}><span>{toast.type === 'success' ? <Check size={16}/> : toast.type === 'error' ? <AlertCircle size={16}/> : <Activity size={16}/>}</span>{toast.text}</div>}
   </div>
 }
