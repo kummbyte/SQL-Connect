@@ -12,7 +12,10 @@
     "dist": "npm run build && electron-builder --mac --arm64",
     "dist:dir": "npm run build && electron-builder --mac --arm64 --dir",
     "dist:zip": "npm run build && electron-builder --mac --arm64 --config.mac.target=zip",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "node --test tests/worker-client.test.cjs",
+    "test:electron": "electron tests/worker-electron.cjs",
+    "test:app": "npm run build && electron tests/app-electron.cjs"
   },
   "dependencies": {
     "@codemirror/lang-sql": "^6.8.0",

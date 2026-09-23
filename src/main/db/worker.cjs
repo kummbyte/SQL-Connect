@@ -4,7 +4,8 @@ const fs = require('node:fs')
 const databases = new Map()
 const quote = (name) => `"${String(name).replaceAll('"', '""')}"`
 const send = (message) => process.parentPort ? process.parentPort.postMessage(message) : process.send(message)
-const onMessage = (fn) => process.parentPort ? process.parentPort.on('message', fn) : process.on('message', fn)
+// Electron delivers MessageEvent objects; Node child_process delivers the payload directly.
+const onMessage = (fn) => process.parentPort ? process.parentPort.on('message', event => fn(event.data)) : process.on('message', fn)
 
 function dbFor(id) {
   const db = databases.get(id)
