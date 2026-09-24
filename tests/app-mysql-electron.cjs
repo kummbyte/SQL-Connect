@@ -18,6 +18,10 @@ app.getAppPath = () => root
 function delay(ms) { return new Promise(resolve => setTimeout(resolve, ms)) }
 async function waitForServer() { for (let i = 0; i < 120; i++) { try { execFileSync(mysql, ['--protocol=socket', '--socket', socket, '-uroot', '-e', 'SELECT 1'], { stdio: 'ignore' }); return } catch { await delay(100) } } throw new Error('temporary MySQL did not start') }
 async function until(fn, description) { for (let i = 0; i < 180; i++) { if (await fn()) return; await delay(100) }; throw new Error(`Timed out: ${description}`) }
+async function press(window, keyCode, modifiers = []) {
+  await window.webContents.sendInputEvent({ type: 'keyDown', keyCode, modifiers })
+  await window.webContents.sendInputEvent({ type: 'keyUp', keyCode, modifiers })
+}
 function setInput(window, index, value) { return window.webContents.executeJavaScript(`(() => { const input = document.querySelectorAll('.modal-card input:not([type="checkbox"])')[${index}]; const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set; setter.call(input, ${JSON.stringify(value)}); input.dispatchEvent(new Event('input', { bubbles: true })); input.dispatchEvent(new Event('change', { bubbles: true })); })()` ) }
 
 app.whenReady().then(async () => {
@@ -55,6 +59,18 @@ app.whenReady().then(async () => {
     await js('Array.from(document.querySelectorAll(".object-row > button:first-child")).find(button => button.textContent.includes("items")).click()')
     await until(() => js('document.querySelectorAll(".table-wrap input")[1]?.value === "other"'), 'same table name uses other_shop context')
     assert.equal(await js('document.querySelector(".toast.error")?.textContent.includes("请选择一个数据库") || false'), false)
+    await js('document.querySelector(".new-query").click()')
+    await until(() => js('!!document.querySelector(".cm-content")'), 'MySQL SQL editor opened')
+    await js('document.querySelector(".cm-content").focus()')
+    await window.webContents.insertText('sel')
+    await until(() => js('document.querySelector(".cm-tooltip-autocomplete")?.textContent.includes("SELECT")'), 'MySQL SQL keyword completion appears')
+    await delay(150)
+    await press(window, 'Tab')
+    await until(() => js('document.querySelector(".cm-content")?.innerText.trim() === "SELECT"'), 'MySQL Tab accepts SQL completion')
+    await js('document.querySelector(".cm-content").focus(); document.execCommand("selectAll")')
+    await window.webContents.insertText('SELECT 1')
+    await press(window, 'ENTER', ['meta'])
+    await until(() => js('Array.from(document.querySelectorAll(".result-table td")).some(cell => cell.textContent.trim() === "1")'), 'MySQL Command-Enter executes SQL')
     await js('document.querySelector(".connection-menu-button").click()')
     await js('document.querySelector("[data-connection-option=mysql]").click()')
     await until(() => js('!!document.querySelector(".modal-card")'), 'duplicate MySQL form opens')

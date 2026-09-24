@@ -22,7 +22,7 @@
 | 构建 | electron-vite 3.1.0、Vite 6.4.3、React Vite 插件 |
 | SQLite | better-sqlite3 13.0.3，原生模块 |
 | MySQL | mysql2 3.24.4，运行在数据库 utility process |
-| SQL 编辑器 | CodeMirror 6、@uiw/react-codemirror 4.25.11、@codemirror/lang-sql 6.10.0 |
+| SQL 编辑器 | CodeMirror 6、@uiw/react-codemirror 4.25.11、@codemirror/lang-sql 6.10.0、自动补全与快捷键扩展 |
 | 编辑器主题与图标 | @codemirror/theme-one-dark 6.1.3、lucide-react 0.468.0 |
 | 应用打包 | electron-builder 26.15.3、ASAR、macOS arm64 |
 | 回归测试 | Node 内置 node:test、真实 Electron utility process、BrowserWindow 界面测试 |
@@ -62,7 +62,8 @@ npm run dist
 
 - `npm test`：请求关联、数据库错误、子进程崩溃、超时、无效响应、发送失败和取消的生命周期测试。
 - `npm run test:electron`：真实 Electron utility process 创建中文路径数据库，执行 SQL、读取表、重新连接和验证错误路径。
-- `npm run test:app`：先构建，再验证“新建连接”菜单、SQLite 子菜单、MySQL 表单取消、Esc 关闭、创建数据库、保存连接、失败提示、文件选择取消和重试。文件选择器返回值由测试替身提供，不能据此宣称原生对话框交互已人工验收。
+- `npm run test:app`：先构建，再验证“新建连接”菜单、SQLite 子菜单、MySQL 表单取消、Esc 关闭、创建数据库、保存连接、失败提示、文件选择取消和重试，以及 SQLite SQL 编辑器的 Tab 补全和 ⌘ Enter 执行。文件选择器返回值由测试替身提供，不能据此宣称原生对话框交互已人工验收。
+- `npm run test:app:mysql`：在隔离 MySQL 8.4 实例中验证多数据库表浏览、同名表上下文、重复连接复用、无密码重连提示、密码保存后重连，以及 MySQL SQL 编辑器的 Tab 补全和 ⌘ Enter 执行。
 - `npm run test:settings`：使用独立配置验证 SQLite 符号链接重复合并、只读保留、MySQL 不同用户区分、配置备份和原子保存。
 - 涉及 worker、IPC 或原生模块的修改，不能只运行类型检查、构建或普通 Node 子进程测试；必须覆盖真实 Electron 通信。
 - 涉及打包路径、preload 或 SQLite 模块时，还应验证打包内容：
@@ -150,7 +151,7 @@ process.on('message', request => handle(request))
 - 当前已验证 SQLite 连接/新建及错误恢复，以及隔离临时 MySQL 8.4 实例的连接、多数据库浏览、结构读取、分页筛选、独立 SQL 会话和 BrowserWindow 首次点击表；MySQL 表格直接编辑、SSH 隧道和客户端证书认证仍未实现。
 - 连接配置按 SQLite 规范化文件路径或 MySQL 主机/端口/用户/TLS/CA 身份去重；历史重复配置启动时合并，SQLite 重复项任一只读时保留只读。
 - 当前表格写入依赖 rowid；复合主键、WITHOUT ROWID 表、生成列、BLOB 和大整数的完整编辑支持不能仅凭现有共享类型或界面推断。
-- 显式事务状态展示、停止按钮到取消 API 的完整联动、SQL 选区执行与快捷键、字段级筛选等，后续开发前应检查实现与测试，不沿用早期交付描述作为完成证据。
+- 显式事务状态展示、停止按钮到取消 API 的完整联动、SQL 选区执行、字段级筛选等，后续开发前应检查实现与测试，不沿用早期交付描述作为完成证据。SQL 编辑器当前支持关键字 Tab 补全和 ⌘ Enter 执行全文，仍不支持选区执行。
 - 变更数据写入逻辑时必须验证事务回滚、并发修改冲突与值类型保持。表格操作使用参数绑定并正确转义标识符，不拼接用户输入值到 SQL。
 - 文档修改无需重复运行应用测试；运行时修改按受影响调用链执行相应回归，并明确报告未验证范围。
 

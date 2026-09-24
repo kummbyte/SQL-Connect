@@ -19,6 +19,10 @@ async function until(fn, description) {
   for (let i = 0; i < 150; i++) { if (await fn()) return; await delay(100) }
   throw new Error(`Timed out: ${description}`)
 }
+async function press(window, keyCode, modifiers = []) {
+  await window.webContents.sendInputEvent({ type: 'keyDown', keyCode, modifiers })
+  await window.webContents.sendInputEvent({ type: 'keyUp', keyCode, modifiers })
+}
 app.whenReady().then(async () => {
   let exitCode = 0
   try {
@@ -88,6 +92,28 @@ app.whenReady().then(async () => {
     await js('document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }))')
     assert.equal(await js('!!document.querySelector(".tab-context-menu")'), false)
     console.log('PASS: tab context menu left/right/others, inactive target, Escape dismissal')
+    await js('document.querySelector(".new-query").click()')
+    await until(() => js('!!document.querySelector(".cm-content")'), 'SQL editor opened')
+    await js('document.querySelector(".cm-content").focus()')
+    await window.webContents.insertText('sel')
+    await until(() => js('document.querySelector(".cm-tooltip-autocomplete")?.textContent.includes("SELECT")'), 'SQL keyword completion appears')
+    await delay(150)
+    await press(window, 'Tab')
+    await until(() => js('document.querySelector(".cm-content")?.innerText.trim() === "SELECT"'), 'Tab accepts SQL completion')
+    await js('document.querySelector(".new-query").click()')
+    await until(() => js('document.querySelector(".cm-content")?.innerText.trim() === ""'), 'new SQL editor is empty')
+    await js('document.querySelector(".cm-content").focus()')
+    await window.webContents.insertText('x')
+    await press(window, 'ENTER')
+    await press(window, 'Tab')
+    assert.equal(await js('/\\n\\s+$/.test(document.querySelector(".cm-content")?.innerText || "")'), true)
+    await js('document.execCommand("selectAll")')
+    await window.webContents.insertText('SELECT 1')
+    const sqlBeforeShortcut = await js('document.querySelector(".cm-content")?.innerText')
+    await press(window, 'ENTER', ['meta'])
+    await until(() => js('Array.from(document.querySelectorAll(".result-table td")).some(cell => cell.textContent.trim() === "1")'), 'Command-Enter executes SQL')
+    assert.equal(sqlBeforeShortcut.includes('\n'), false)
+    console.log('PASS: SQL keyword completion with Tab and Command-Enter execution')
     savePath = join(directory, 'missing-directory', 'fail.sqlite')
     await js('document.querySelector(".connection-menu-button").click()')
     await js('document.querySelector("[data-connection-option=sqlite]").click()')
