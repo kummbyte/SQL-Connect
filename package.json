@@ -1,6 +1,6 @@
 {
   "name": "sql-connect",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "A focused SQLite desktop client for macOS",
   "main": "out/main/index.js",
   "author": "SQL Connect",
@@ -15,6 +15,8 @@
     "typecheck": "tsc --noEmit",
     "test": "node --test tests/worker-client.test.cjs",
     "test:electron": "electron tests/worker-electron.cjs",
+    "test:mysql": "electron tests/mysql-worker-electron.cjs",
+    "test:app:mysql": "npm run build && electron tests/app-mysql-electron.cjs",
     "test:app": "npm run build && electron tests/app-electron.cjs"
   },
   "dependencies": {
@@ -22,6 +24,7 @@
     "@uiw/react-codemirror": "^4.23.10",
     "better-sqlite3": "^13.0.3",
     "lucide-react": "^0.468.0",
+    "mysql2": "^3.24.4",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"
   },

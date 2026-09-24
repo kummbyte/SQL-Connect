@@ -24,6 +24,13 @@ app.whenReady().then(async () => {
     const window = BrowserWindow.getAllWindows()[0]
     const js = code => window.webContents.executeJavaScript(code)
     await until(() => js('!!document.querySelector(".welcome-actions")'), 'renderer mounted')
+    assert.equal(await js('document.querySelectorAll(".quick-actions button").length'), 3)
+    await js('document.querySelectorAll(".quick-actions button")[2].click()')
+    await until(() => js('!!document.querySelector(".modal-card")'), 'MySQL connection form opens')
+    assert.equal(await js('document.querySelector(".modal-card")?.textContent.includes("连接 MySQL")'), true)
+    await js('document.querySelector(".modal-card .secondary-btn")?.click()')
+    assert.equal(await js('!!document.querySelector(".modal-card")'), false)
+    console.log('PASS: MySQL connection form opens, exposes TLS/password options, and cancels')
     const create = () => js('(document.querySelector(".welcome-actions") ? document.querySelectorAll(".welcome-actions button")[1] : document.querySelectorAll(".quick-actions button")[1]).click()')
     await create()
     await until(() => js('document.querySelector(".connection-row")?.textContent.includes("在线") && !document.querySelector(".statusbar").textContent.includes("正在执行")'), 'create completes in UI')

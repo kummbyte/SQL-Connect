@@ -4,7 +4,7 @@
 
 ## 项目与执行环境
 
-- 产品：SQL Connect，类似 Navicat 的桌面数据库客户端，当前只面向普通本地 SQLite 文件。
+- 产品：SQL Connect，类似 Navicat 的桌面数据库客户端，支持普通本地 SQLite 文件和 TCP/TLS MySQL 连接。
 - 项目源目录：`/Users/wuqiang/Projects/SQL-Connect`。在当前 Mac 本地安装依赖、运行测试和打包，不自动切换到 WSL。
 - 当前目标平台：Apple Silicon macOS（arm64）。Windows、SQLCipher、远程数据库不属于首版已验证范围。
 - 使用 npm，维护 `package.json` 与 `package-lock.json`；不要随意混用包管理器或删除锁文件。
@@ -21,6 +21,7 @@
 | 界面 | React / React DOM 18.3.1、TypeScript 5.9.3、自定义 CSS |
 | 构建 | electron-vite 3.1.0、Vite 6.4.3、React Vite 插件 |
 | SQLite | better-sqlite3 13.0.3，原生模块 |
+| MySQL | mysql2 3.24.4，运行在数据库 utility process |
 | SQL 编辑器 | CodeMirror 6、@uiw/react-codemirror 4.25.11、@codemirror/lang-sql 6.10.0 |
 | 编辑器主题与图标 | @codemirror/theme-one-dark 6.1.3、lucide-react 0.468.0 |
 | 应用打包 | electron-builder 26.15.3、ASAR、macOS arm64 |
@@ -30,7 +31,7 @@
 
 ## 架构与文件入口
 
-调用链：React 界面 → `window.sqlConnect` → preload → 主进程 IPC → `WorkerClient` → utility process → SQLite。
+调用链：React 界面 → `window.sqlConnect` → preload → 主进程 IPC → `WorkerClient` → utility process → SQLite/MySQL 适配器。
 
 - `src/main/index.ts`：窗口、文件选择器、连接配置读写、IPC 注册；每个连接管理一个独立数据库子进程。
 - `src/main/db/worker-client.ts`：请求编号、响应关联、超时、异常退出和关闭时的 Promise 清理。
@@ -49,6 +50,8 @@ npm run dev
 npm run typecheck
 npm test
 npm run test:electron
+npm run test:mysql
+npm run test:app:mysql
 npm run test:app
 npm run build
 npm run dist:dir
@@ -142,7 +145,7 @@ process.on('message', request => handle(request))
 
 ## 功能状态与后续修改原则
 
-- 本次重点验证的是连接、新建数据库及错误恢复链路，不代表最初计划中的所有功能都已实现或验收。
+- 当前已验证 SQLite 连接/新建及错误恢复，以及隔离临时 MySQL 8.4 实例的连接、多数据库浏览、结构读取、分页筛选、独立 SQL 会话和 BrowserWindow 首次点击表；MySQL 表格直接编辑、SSH 隧道和客户端证书认证仍未实现。
 - 当前表格写入依赖 rowid；复合主键、WITHOUT ROWID 表、生成列、BLOB 和大整数的完整编辑支持不能仅凭现有共享类型或界面推断。
 - 显式事务状态展示、停止按钮到取消 API 的完整联动、SQL 选区执行与快捷键、字段级筛选等，后续开发前应检查实现与测试，不沿用早期交付描述作为完成证据。
 - 变更数据写入逻辑时必须验证事务回滚、并发修改冲突与值类型保持。表格操作使用参数绑定并正确转义标识符，不拼接用户输入值到 SQL。
