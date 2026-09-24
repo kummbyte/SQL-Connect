@@ -31,8 +31,9 @@ app.whenReady().then(async () => {
     await until(() => BrowserWindow.getAllWindows().length > 0, 'window created')
     const window = BrowserWindow.getAllWindows()[0]
     const js = code => window.webContents.executeJavaScript(code)
-    await until(() => js('!!document.querySelector(".quick-actions")'), 'renderer mounted')
-    await js('document.querySelectorAll(".quick-actions button")[2].click()')
+    await until(() => js('!!document.querySelector(".connection-menu-button")'), 'renderer mounted')
+    await js('document.querySelector(".connection-menu-button").click()')
+    await js('document.querySelector("[data-connection-option=mysql]").click()')
     await until(() => js('!!document.querySelector(".modal-card")'), 'MySQL form opened')
     await setInput(window, 0, 'MySQL UI test')
     await setInput(window, 1, '127.0.0.1')

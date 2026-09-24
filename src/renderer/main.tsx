@@ -37,6 +37,11 @@ function App() {
   const [page, setPage] = useState(0)
   const [sort, setSort] = useState<{ column?: string; direction?: 'asc' | 'desc' }>({})
   const [contextMenu, setContextMenu] = useState<ContextMenu | null>(null)
+  const [connectionMenuOpen, setConnectionMenuOpen] = useState(false)
+  const [connectionSubmenuOpen, setConnectionSubmenuOpen] = useState(false)
+  const connectionMenuRef = useRef<HTMLDivElement>(null)
+  const connectionMenuButtonRef = useRef<HTMLButtonElement>(null)
+  const connectionMenuItems = useRef<Record<string, HTMLButtonElement | null>>({})
   const [showMySQL, setShowMySQL] = useState(false)
   const [editingMySQLId, setEditingMySQLId] = useState<string | null>(null)
   const [mysqlForm, setMysqlForm] = useState({ name: 'MySQL 连接', host: '127.0.0.1', port: '3306', user: 'root', password: '', rememberPassword: false, tls: true, caPath: '' })
@@ -55,6 +60,39 @@ function App() {
     document.addEventListener('scroll', close, true)
     return () => { window.removeEventListener('mousedown', close); window.removeEventListener('blur', close); window.removeEventListener('keydown', onKeyDown); document.removeEventListener('scroll', close, true) }
   }, [contextMenu])
+  useEffect(() => {
+    if (!connectionMenuOpen) return
+    const close = (event: MouseEvent) => { if (!connectionMenuRef.current?.contains(event.target as Node)) { setConnectionMenuOpen(false); setConnectionSubmenuOpen(false) } }
+    const onBlur = () => { setConnectionMenuOpen(false); setConnectionSubmenuOpen(false) }
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') { event.preventDefault(); setConnectionMenuOpen(false); setConnectionSubmenuOpen(false); connectionMenuButtonRef.current?.focus(); return }
+      if (event.key === 'Enter') {
+        const option = (document.activeElement as HTMLElement | null)?.dataset.connectionOption
+        if (option === 'sqlite') openSQLiteSubmenu()
+        else if (option === 'mysql') openMySQLDialog()
+        else if (option === 'sqlite-create') chooseSQLite(true)
+        else if (option === 'sqlite-open') chooseSQLite(false)
+        if (option) { event.preventDefault(); return }
+      }
+      if (event.key === 'ArrowRight' && !connectionSubmenuOpen) { event.preventDefault(); setConnectionSubmenuOpen(true); return }
+      if (event.key === 'ArrowLeft' && connectionSubmenuOpen) { event.preventDefault(); setConnectionSubmenuOpen(false); connectionMenuItems.current.sqlite?.focus(); return }
+      if (!connectionSubmenuOpen && (event.key === 'ArrowDown' || event.key === 'ArrowUp')) {
+        event.preventDefault(); const next = event.key === 'ArrowDown' ? 'mysql' : 'sqlite'; connectionMenuItems.current[next]?.focus()
+      }
+      if (connectionSubmenuOpen && (event.key === 'ArrowDown' || event.key === 'ArrowUp')) {
+        event.preventDefault(); const next = event.key === 'ArrowDown' ? 'open' : 'new'; connectionMenuItems.current[next]?.focus()
+      }
+    }
+    window.addEventListener('mousedown', close)
+    window.addEventListener('blur', onBlur)
+    window.addEventListener('keydown', onKeyDown)
+    return () => { window.removeEventListener('mousedown', close); window.removeEventListener('blur', onBlur); window.removeEventListener('keydown', onKeyDown) }
+  }, [connectionMenuOpen, connectionSubmenuOpen])
+  useEffect(() => {
+    if (!connectionMenuOpen) return
+    const key = connectionSubmenuOpen ? 'new' : 'sqlite'
+    requestAnimationFrame(() => connectionMenuItems.current[key]?.focus())
+  }, [connectionMenuOpen, connectionSubmenuOpen])
   const active = tabs.find(t => t.id === activeTab)
   const activeConnection = active?.connectionId || connected[0] || ''
   const activeDatabase = active?.database || selectedDatabase[activeConnection] || ''
@@ -126,13 +164,16 @@ function App() {
   const activeChanges = activeTab ? pending[activeTab] || [] : []
   const newQuery = () => { const connectionId = connected[0]; if (!connectionId) { notify('请先连接数据库', 'info'); return } const database = selectedDatabase[connectionId]; const id = `${connectionId}:${database || ''}:query:${uid()}`; const tab: Tab = { id, kind: 'query', title: 'SQL 查询', sql: '', connectionId, database }; setTabs(v => { const next = [...v, tab]; tabsRef.current = next; return next }); setSqlByTab(v => ({ ...v, [id]: '' })); setActiveTab(id); setSqlText('') }
   const handleSqlChange = (value: string) => { setSqlText(value); if (activeTab) setSqlByTab(v => ({ ...v, [activeTab]: value })) }
+  const closeConnectionMenu = () => { setConnectionMenuOpen(false); setConnectionSubmenuOpen(false) }
+  const openSQLiteSubmenu = () => setConnectionSubmenuOpen(true)
+  const openMySQLDialog = () => { closeConnectionMenu(); setEditingMySQLId(null); setShowMySQL(true) }
+  const chooseSQLite = (create: boolean) => { closeConnectionMenu(); void addConnection(create) }
 
   return <div className="app-shell">
     <header className="topbar"><div className="brand"><div className="brand-mark"><Database size={18}/></div><span>SQL Connect</span><span className="version">SQLite · MySQL</span></div><div className="top-actions"><button className="icon-btn" onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')} title="切换主题">{theme === 'dark' ? <Sun size={17}/> : <Moon size={17}/>}</button><button className="icon-btn" title="设置"><Settings2 size={17}/></button></div></header>
     <div className="main-layout">
       <aside className="sidebar">
-        <div className="sidebar-head"><div><div className="eyebrow">WORKSPACE</div><h2>连接</h2></div><button className="icon-btn accent" onClick={() => void addConnection()} title="打开 SQLite"><Plus size={18}/></button></div>
-        <div className="quick-actions"><button onClick={() => void addConnection()}><FolderOpen size={15}/>打开 SQLite</button><button onClick={() => void addConnection(true)}><FilePlus2 size={15}/>新建 SQLite</button><button onClick={() => { setEditingMySQLId(null); setShowMySQL(true) }}><Database size={15}/>连接 MySQL</button></div>
+        <div className="sidebar-head"><div><div className="eyebrow">WORKSPACE</div><h2>新建连接</h2></div><div className="connection-menu-anchor" ref={connectionMenuRef}><button ref={connectionMenuButtonRef} className="icon-btn accent connection-menu-button" onClick={() => { if (connectionMenuOpen) closeConnectionMenu(); else { setConnectionSubmenuOpen(false); setConnectionMenuOpen(true) } }} title="新建连接" aria-label="新建连接" aria-expanded={connectionMenuOpen}><Plus size={18}/></button>{connectionMenuOpen && <div className="connection-menu" role="menu"><div className="connection-menu-panel"><button ref={element => { connectionMenuItems.current.sqlite = element }} className={`connection-menu-item ${connectionSubmenuOpen ? 'selected' : ''}`} data-connection-option="sqlite" role="menuitem" onClick={openSQLiteSubmenu}><Database size={15}/><span>SQLite</span><ChevronRight size={14} className="connection-menu-arrow"/></button><button ref={element => { connectionMenuItems.current.mysql = element }} className="connection-menu-item" data-connection-option="mysql" role="menuitem" onClick={openMySQLDialog}><Database size={15}/><span>MySQL</span></button></div>{connectionSubmenuOpen && <div className="connection-submenu" role="menu"><button ref={element => { connectionMenuItems.current.new = element }} className="connection-menu-item" data-connection-option="sqlite-create" role="menuitem" onClick={() => chooseSQLite(true)}><FilePlus2 size={15}/><span>新建 SQLite</span></button><button ref={element => { connectionMenuItems.current.open = element }} className="connection-menu-item" data-connection-option="sqlite-open" role="menuitem" onClick={() => chooseSQLite(false)}><FolderOpen size={15}/><span>打开 SQLite</span></button></div>}</div>}</div></div>
         <div className="connection-list">{connections.length === 0 && <div className="empty-connect"><Database size={28}/><p>还没有连接</p><span>打开 SQLite 或连接 MySQL</span></div>}{connections.map(item => <div className="connection-block" key={item.id}><button className="tree-row connection-row" onClick={() => void toggleConnection(item)}><span className="chevron">{expanded[item.id] ? <ChevronDown size={15}/> : <ChevronRight size={15}/>}</span><CircleDot size={13} className={connected.includes(item.id) ? 'connected-dot' : 'offline-dot'}/><span className="tree-label">{item.name}</span><span className="object-type">{item.type === 'mysql' ? 'MYSQL' : 'SQLITE'}</span>{connected.includes(item.id) && <span className="connected-label">在线</span>}{item.type !== 'mysql' && <span className="readonly-control" title={item.readonly ? '只读连接' : '读写连接'} onClick={event => { event.stopPropagation(); const next = { ...item, readonly: !item.readonly }; persist(connections.map(c => c.id === item.id ? next : c)); if (connected.includes(item.id)) void disconnect(item.id).then(() => connect(next)) }}>{item.readonly ? <Lock size={12}/> : <span>RW</span>}</span>}</button>{expanded[item.id] && connected.includes(item.id) && <div className="tree-children">{item.type === 'mysql' ? <>{<div className="tree-section-label">数据库</div>}{(mysqlDatabases[item.id] || []).map(database => <div key={database}><button className="tree-row" onClick={() => { setSelectedDatabase(v => ({ ...v, [item.id]: database })); void loadSchema(item.id, database) }}><span className="chevron">{selectedDatabase[item.id] === database ? <ChevronDown size={13}/> : <ChevronRight size={13}/>}</span><Database size={13}/><span className="tree-label">{database}</span></button>{selectedDatabase[item.id] === database && <div className="tree-children"><div className="tree-section-label">表和视图</div>{(schema[`${item.id}|${database}`] || []).map(table => <div className="object-row" key={table.name}><button onClick={() => void openTable(item.id, table, 'table', database)}><Table2 size={14}/><span>{table.name}</span><span className="object-type">{table.type === 'view' ? 'VIEW' : 'TABLE'}</span></button><button className="structure-btn" onClick={() => void openTable(item.id, table, 'structure', database)} title="查看结构"><Settings2 size={13}/></button></div>)}</div>}</div>)}</> : <><div className="tree-section-label">表和视图</div>{(schema[item.id] || []).map(table => <div className="object-row" key={table.name}><button onClick={() => void openTable(item.id, table)}><Table2 size={14}/><span>{table.name}</span><span className="object-type">{table.type === 'view' ? 'VIEW' : 'TABLE'}</span></button><button className="structure-btn" onClick={() => void openTable(item.id, table, 'structure')} title="查看结构"><Settings2 size={13}/></button></div>)}</>}</div>}</div>)}</div>
         {connections.length > 0 && <div className="sidebar-footer"><button onClick={() => { const item = connections.find(c => connected.includes(c.id)); if (item) void disconnect(item.id) }}><X size={14}/>断开当前连接</button></div>}
       </aside>

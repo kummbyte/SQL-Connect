@@ -35,7 +35,7 @@ npm run test:app:mysql
 npm run test:app
 ```
 
-分别覆盖请求生命周期（退出、超时、异常消息）、真实 Electron utility process 的 SQLite 和本机 MySQL 8.4 通信，以及 BrowserWindow 中连接 MySQL、选择数据库和首次点击表的完整流程。MySQL 测试会在临时数据目录和端口启动隔离实例，创建临时数据库和账号后自动清理，不读取用户连接配置。界面测试包含中文文件名、创建失败后恢复、重试和取消文件选择。
+分别覆盖请求生命周期（退出、超时、异常消息）、真实 Electron utility process 的 SQLite 和本机 MySQL 8.4 通信，以及 BrowserWindow 中连接 MySQL、选择数据库和首次点击表的完整流程。MySQL 测试会在临时数据目录和端口启动隔离实例，创建临时数据库和账号后自动清理，不读取用户连接配置。界面测试还覆盖“新建连接”菜单、SQLite 子菜单、MySQL 表单取消、文件选择取消、创建失败后恢复和重试。
 
 打包后可复用同一界面测试验证 ASAR 中的程序和 SQLite 模块：
 
