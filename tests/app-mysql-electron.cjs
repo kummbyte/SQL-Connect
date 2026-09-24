@@ -67,6 +67,12 @@ app.whenReady().then(async () => {
     assert.equal(await js('document.querySelectorAll(".modal-card input[type=checkbox]")[0].checked'), false)
     await js('document.querySelector(".modal-card button[type=submit]").click()')
     await until(() => js('document.querySelectorAll(".connection-row").length === 1 && document.querySelector(".toast.info")?.textContent.includes("已复用现有连接")'), 'duplicate MySQL reuses existing connection')
+    const savedMySQL = await js('window.sqlConnect.settings.load().then(items => items.find(item => item.type === "mysql"))')
+    assert.ok(savedMySQL)
+    const missingPassword = await js(`(async () => { await window.sqlConnect.db.disconnect(${JSON.stringify(savedMySQL.id)}); try { await window.sqlConnect.db.connect(${JSON.stringify(savedMySQL)}); return null } catch (error) { return error instanceof Error ? error.message : String(error) } })()`)
+    assert.equal(missingPassword.endsWith('请输入 MySQL 密码'), true)
+    const rememberedReconnect = await js(`(async () => { try { const first = await window.sqlConnect.db.connect(${JSON.stringify({ ...savedMySQL, password: 'secret', rememberPassword: true })}); await window.sqlConnect.db.disconnect(first.connection.id); const second = await window.sqlConnect.db.connect(${JSON.stringify(savedMySQL)}); const persisted = (await window.sqlConnect.settings.load()).find(item => item.type === 'mysql'); await window.sqlConnect.db.disconnect(second.connection.id); return { rememberPassword: persisted?.rememberPassword, reconnected: true } } catch (error) { return { error: error instanceof Error ? error.message : String(error) } } })()`)
+    assert.deepEqual(rememberedReconnect, { rememberPassword: true, reconnected: true })
     console.log('PASS: BrowserWindow MySQL connection → database selection → same table name and duplicate connection reuse')
   } catch (error) { console.error(error); exitCode = 1 } finally {
     app.emit('before-quit', { preventDefault() {} })

@@ -109,11 +109,13 @@ async function connect(connection: Connection) {
   ensureSettingsLoaded()
   const normalized = normalizeConnection(connection)
   const existing = savedConnections.find(item => connectionIdentity(item) === connectionIdentity(normalized))
-  const canonical = existing ? (existing.type === 'sqlite' ? existing : { ...existing, password: normalized.type === 'mysql' ? normalized.password : undefined }) : normalized
+  const canonical = existing ? (existing.type === 'sqlite' ? existing : { ...existing, password: normalized.type === 'mysql' ? normalized.password : undefined, rememberPassword: (existing.type === 'mysql' && existing.rememberPassword) || (normalized.type === 'mysql' && normalized.rememberPassword) }) : normalized
   const key = connectionIdentity(canonical)
   if (workers.has(canonical.id)) return { ok: true, connection: safeConnection(canonical), reused: true }
   const running = pendingConnects.get(key)
   if (running) return { ...(await running), reused: true }
+  if (canonical.type === 'mysql' && !sessionPasswords.has(canonical.id)) readEncryptedPassword(rawSettings.get(canonical.id), canonical.id)
+  if (canonical.type === 'mysql' && !(normalized.type === 'mysql' && normalized.password) && !sessionPasswords.get(canonical.id)) throw new Error('请输入 MySQL 密码')
   const request = (async (): Promise<ConnectResult> => {
     const effective = canonical.type === 'mysql' ? { ...canonical, password: (normalized.type === 'mysql' && normalized.password) || sessionPasswords.get(canonical.id) } : canonical
     const client = spawnWorker(canonical)
