@@ -15,6 +15,7 @@
     "typecheck": "tsc --noEmit",
     "test": "node --test tests/worker-client.test.cjs",
     "test:electron": "electron tests/worker-electron.cjs",
+    "test:settings": "npm run build && electron tests/settings-electron.cjs",
     "test:mysql": "electron tests/mysql-worker-electron.cjs",
     "test:app:mysql": "npm run build && electron tests/app-mysql-electron.cjs",
     "test:app": "npm run build && electron tests/app-electron.cjs"

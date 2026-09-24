@@ -5,6 +5,7 @@ export type MySQLConnection = {
   rememberPassword?: boolean; lastOpened?: string
 }
 export type Connection = SQLiteConnection | MySQLConnection
+export type ConnectResult = { ok: true; connection: Connection; reused: boolean }
 
 export type TableInfo = { name: string; type: 'table' | 'view'; sql?: string }
 export type ColumnInfo = { cid: number; name: string; type: string; notnull: number; dflt_value: string | null; pk: number }
@@ -13,10 +14,10 @@ export type QueryResult = { columns: string[]; rows: Record<string, unknown>[]; 
 export type PendingChange = { type: 'insert' | 'update' | 'delete'; table: string; rowid?: number | string; values: Record<string, unknown>; original?: Record<string, unknown> }
 
 export type SqlConnectApi = {
-  settings: { load: () => Promise<Connection[]>; save: (connections: Connection[]) => Promise<boolean> }
+  settings: { load: () => Promise<Connection[]>; save: (connections: Connection[]) => Promise<Connection[]> }
   dialog: { openFile: () => Promise<string | null>; openCertificate: () => Promise<string | null>; saveFile: () => Promise<string | null> }
   db: {
-    connect: (connection: Connection) => Promise<{ ok: true }>
+    connect: (connection: Connection) => Promise<ConnectResult>
     disconnect: (connectionId: string) => Promise<boolean>
     databases: (connectionId: string) => Promise<string[]>
     schema: (connectionId: string, database?: string) => Promise<TableInfo[]>
