@@ -7,7 +7,7 @@ import { indentWithTab } from '@codemirror/commands'
 import { Prec } from '@codemirror/state'
 import { EditorView, keymap } from '@codemirror/view'
 import { oneDark } from '@codemirror/theme-one-dark'
-import { Activity, AlertCircle, Check, ChevronDown, ChevronRight, CircleDot, Database, FilePlus2, FolderOpen, Lock, Moon, Play, Plus, RefreshCw, Save, Search, Settings2, Square, Sun, Table2, Trash2, X, Zap } from 'lucide-react'
+import { Activity, AlertCircle, Check, ChevronDown, ChevronRight, CircleDot, Database, FilePlus2, FolderOpen, Lock, Moon, Play, Plus, RefreshCw, Save, Search, Settings2, Square, Sun, Table2, Trash2, Unplug, X, Zap } from 'lucide-react'
 import type { Connection, MySQLConnection, PendingChange, QueryResult, Structure, TableInfo } from '../shared/types'
 import './styles.css'
 
@@ -26,6 +26,8 @@ const errorText = (error: unknown) => {
 function App() {
   const [connections, setConnections] = useState<Connection[]>([])
   const [connected, setConnected] = useState<string[]>([])
+  const [disconnecting, setDisconnecting] = useState<string[]>([])
+  const disconnectingRef = useRef(new Set<string>())
   const [schema, setSchema] = useState<Record<string, TableInfo[]>>({})
   const [mysqlDatabases, setMysqlDatabases] = useState<Record<string, string[]>>({})
   const [selectedDatabase, setSelectedDatabase] = useState<Record<string, string>>({})
@@ -106,7 +108,7 @@ function App() {
   const activeConnection = active?.connectionId || connected[0] || ''
   const activeDatabase = active?.database || selectedDatabase[activeConnection] || ''
 
-  const persist = async (next: Connection[]) => { try { const saved = await window.sqlConnect.settings.save(next); setConnections(saved) } catch (error) { notify(error instanceof Error ? error.message : String(error), 'error') } }
+  const persist = async (next: Connection[]) => { try { const saved = await window.sqlConnect.settings.save(next); setConnections(saved); return true } catch (error) { notify(error instanceof Error ? error.message : String(error), 'error'); return false } }
   const notify = (text: string, type: Toast['type'] = 'info') => setToast({ text, type })
 
   async function addConnection(create = false) {
@@ -120,7 +122,60 @@ function App() {
   async function loadSchema(connectionId: string, database?: string) { try { const items = await window.sqlConnect.db.schema(connectionId, database); setSchema(v => ({ ...v, [`${connectionId}|${database || ''}`]: items })) } catch (error) { notify(error instanceof Error ? error.message : String(error), 'error') } }
   async function addMySQL() { const item: MySQLConnection = { type: 'mysql', id: editingMySQLId || uid(), name: mysqlForm.name.trim() || 'MySQL 连接', host: mysqlForm.host.trim(), port: Number(mysqlForm.port) || 3306, user: mysqlForm.user.trim(), password: mysqlForm.password, rememberPassword: mysqlForm.rememberPassword, tls: mysqlForm.tls, caPath: mysqlForm.caPath || undefined }; const ok = await connect(item); if (ok) { setEditingMySQLId(null); setShowMySQL(false) } }
   async function toggleConnection(item: Connection) { if (!connected.includes(item.id)) { await connect(item); return }; setExpanded(v => ({ ...v, [item.id]: !v[item.id] })); if (item.type === 'mysql' && !mysqlDatabases[item.id]) { try { const names = await window.sqlConnect.db.databases(item.id); setMysqlDatabases(v => ({ ...v, [item.id]: names })); if (names[0]) { setSelectedDatabase(v => ({ ...v, [item.id]: names[0] })); await loadSchema(item.id, names[0]) } } catch (error) { notify(error instanceof Error ? error.message : String(error), 'error') } } }
-  async function disconnect(id: string) { for (const tab of tabsRef.current.filter(t => t.connectionId === id && t.kind === 'query')) if (connections.find(c => c.id === id)?.type === 'mysql') void window.sqlConnect.db.closeSession(id, tab.id); await window.sqlConnect.db.disconnect(id); setConnected(v => v.filter(item => item !== id)); setSchema(v => { const copy = { ...v }; Object.keys(copy).filter(k => k.startsWith(`${id}|`)).forEach(k => delete copy[k]); return copy }); setMysqlDatabases(v => { const copy = { ...v }; delete copy[id]; return copy }); setTabs(v => { const next = v.filter(t => t.connectionId !== id); tabsRef.current = next; return next }); setSqlByTab(v => Object.fromEntries(Object.entries(v).filter(([tabId]) => !tabId.startsWith(`${id}:`)))); setActiveTab(current => current && tabsRef.current.some(t => t.id === current) ? current : null); notify('连接已断开') }
+  function removeConnectionState(id: string) {
+    const targetTabs = tabsRef.current.filter(tab => tab.connectionId === id)
+    const firstIndex = tabsRef.current.findIndex(tab => tab.connectionId === id)
+    const remaining = tabsRef.current.filter(tab => tab.connectionId !== id)
+    const activeWillClose = activeTab ? targetTabs.some(tab => tab.id === activeTab) : false
+    const nextActive = !activeWillClose ? activeTab : remaining[Math.min(Math.max(firstIndex, 0), remaining.length - 1)]?.id || remaining[Math.max(0, firstIndex - 1)]?.id || null
+    setConnected(v => v.filter(item => item !== id))
+    setExpanded(v => { const copy = { ...v }; delete copy[id]; return copy })
+    setSelectedDatabase(v => { const copy = { ...v }; delete copy[id]; return copy })
+    setSchema(v => { const copy = { ...v }; Object.keys(copy).filter(k => k === id || k.startsWith(`${id}|`)).forEach(k => delete copy[k]); return copy })
+    setMysqlDatabases(v => { const copy = { ...v }; delete copy[id]; return copy })
+    setTabs(remaining); tabsRef.current = remaining; setActiveTab(nextActive)
+    setResults(current => { const next = { ...current }; targetTabs.forEach(tab => delete next[tab.id]); return next })
+    setStructures(current => { const next = { ...current }; targetTabs.forEach(tab => delete next[tab.id]); return next })
+    setPending(current => { const next = { ...current }; targetTabs.forEach(tab => delete next[tab.id]); return next })
+    setSqlByTab(current => { const next = { ...current }; targetTabs.forEach(tab => delete next[tab.id]); return next })
+    if (nextActive) { const nextTab = remaining.find(tab => tab.id === nextActive); if (nextTab?.kind === 'query') setSqlText(sqlByTab[nextActive] ?? nextTab.sql ?? '') }
+  }
+  async function disconnect(id: string): Promise<boolean> {
+    if (disconnectingRef.current.has(id)) return false
+    const targetTabs = tabsRef.current.filter(tab => tab.connectionId === id)
+    const dirtyTabs = targetTabs.filter(tab => (pending[tab.id] || []).length > 0)
+    if (dirtyTabs.length > 0) {
+      const names = dirtyTabs.map(tab => `• ${tab.title}`).join('\n')
+      if (!window.confirm(`以下标签有未提交修改，断开后将放弃：\n${names}\n\n确定放弃修改并断开吗？`)) return false
+    }
+    disconnectingRef.current.add(id)
+    setDisconnecting(v => [...new Set([...v, id])])
+    try {
+      const connection = connections.find(item => item.id === id)
+      if (connection?.type === 'mysql') await Promise.all(targetTabs.filter(tab => tab.kind === 'query').map(tab => window.sqlConnect.db.closeSession(id, tab.id).catch(() => undefined)))
+      await window.sqlConnect.db.disconnect(id)
+      removeConnectionState(id)
+      notify('连接已断开')
+      return true
+    } catch (error) {
+      notify(errorText(error), 'error')
+      return false
+    } finally {
+      disconnectingRef.current.delete(id)
+      setDisconnecting(v => v.filter(item => item !== id))
+    }
+  }
+  async function toggleReadonly(item: Connection) {
+    if (disconnectingRef.current.has(item.id)) return
+    const next = { ...item, readonly: !item.readonly }
+    const wasConnected = connected.includes(item.id)
+    if (wasConnected) {
+      const ok = await disconnect(item.id)
+      if (!ok) return
+    }
+    const saved = await persist(connections.map(connection => connection.id === item.id ? next : connection))
+    if (saved && wasConnected && item.type !== 'mysql' && !disconnectingRef.current.has(item.id)) await connect(next)
+  }
   async function openTable(connectionId: string, item: TableInfo, kind: Tab['kind'] = 'table', database?: string) {
     const id = `${connectionId}:${database || ''}:${kind}:${item.name}`; const nextTab: Tab = { id, kind, title: item.name, table: item.name, connectionId, database }; setTabs(v => { const next = v.some(t => t.id === id) ? v : [...v, nextTab]; tabsRef.current = next; return next }); setActiveTab(id); setPage(0); setFilter(''); setSort({})
     if (kind === 'structure') { if (!structures[id]) setStructures(v => ({ ...v, [id]: undefined as never })); try { const structure = await window.sqlConnect.db.structure(connectionId, item.name, database); if (tabsRef.current.some(t => t.id === id)) setStructures(v => ({ ...v, [id]: structure })) } catch (error) { notify(error instanceof Error ? error.message : String(error), 'error') } }
@@ -183,8 +238,7 @@ function App() {
     <div className="main-layout">
       <aside className="sidebar">
         <div className="sidebar-head"><div><div className="eyebrow">WORKSPACE</div><h2>新建连接</h2></div><div className="connection-menu-anchor" ref={connectionMenuRef}><button ref={connectionMenuButtonRef} className="icon-btn accent connection-menu-button" onClick={() => { if (connectionMenuOpen) closeConnectionMenu(); else { setConnectionSubmenuOpen(false); setConnectionMenuOpen(true) } }} title="新建连接" aria-label="新建连接" aria-expanded={connectionMenuOpen}><Plus size={18}/></button>{connectionMenuOpen && <div className="connection-menu" role="menu"><div className="connection-menu-panel"><button ref={element => { connectionMenuItems.current.sqlite = element }} className={`connection-menu-item ${connectionSubmenuOpen ? 'selected' : ''}`} data-connection-option="sqlite" role="menuitem" onClick={openSQLiteSubmenu}><Database size={15}/><span>SQLite</span><ChevronRight size={14} className="connection-menu-arrow"/></button><button ref={element => { connectionMenuItems.current.mysql = element }} className="connection-menu-item" data-connection-option="mysql" role="menuitem" onClick={openMySQLDialog}><Database size={15}/><span>MySQL</span></button></div>{connectionSubmenuOpen && <div className="connection-submenu" role="menu"><button ref={element => { connectionMenuItems.current.new = element }} className="connection-menu-item" data-connection-option="sqlite-create" role="menuitem" onClick={() => chooseSQLite(true)}><FilePlus2 size={15}/><span>新建 SQLite</span></button><button ref={element => { connectionMenuItems.current.open = element }} className="connection-menu-item" data-connection-option="sqlite-open" role="menuitem" onClick={() => chooseSQLite(false)}><FolderOpen size={15}/><span>打开 SQLite</span></button></div>}</div>}</div></div>
-        <div className="connection-list">{connections.length === 0 && <div className="empty-connect"><Database size={28}/><p>还没有连接</p><span>打开 SQLite 或连接 MySQL</span></div>}{connections.map(item => <div className="connection-block" key={item.id}><button className="tree-row connection-row" onClick={() => void toggleConnection(item)}><span className="chevron">{expanded[item.id] ? <ChevronDown size={15}/> : <ChevronRight size={15}/>}</span><CircleDot size={13} className={connected.includes(item.id) ? 'connected-dot' : 'offline-dot'}/><span className="tree-label">{item.name}</span><span className="object-type">{item.type === 'mysql' ? 'MYSQL' : 'SQLITE'}</span>{connected.includes(item.id) && <span className="connected-label">在线</span>}{item.type !== 'mysql' && <span className="readonly-control" title={item.readonly ? '只读连接' : '读写连接'} onClick={event => { event.stopPropagation(); const next = { ...item, readonly: !item.readonly }; persist(connections.map(c => c.id === item.id ? next : c)); if (connected.includes(item.id)) void disconnect(item.id).then(() => connect(next)) }}>{item.readonly ? <Lock size={12}/> : <span>RW</span>}</span>}</button>{expanded[item.id] && connected.includes(item.id) && <div className="tree-children">{item.type === 'mysql' ? <>{<div className="tree-section-label">数据库</div>}{(mysqlDatabases[item.id] || []).map(database => <div key={database}><button className="tree-row" onClick={() => { setSelectedDatabase(v => ({ ...v, [item.id]: database })); void loadSchema(item.id, database) }}><span className="chevron">{selectedDatabase[item.id] === database ? <ChevronDown size={13}/> : <ChevronRight size={13}/>}</span><Database size={13}/><span className="tree-label">{database}</span></button>{selectedDatabase[item.id] === database && <div className="tree-children"><div className="tree-section-label">表和视图</div>{(schema[`${item.id}|${database}`] || []).map(table => <div className="object-row" key={table.name}><button onClick={() => void openTable(item.id, table, 'table', database)}><Table2 size={14}/><span>{table.name}</span><span className="object-type">{table.type === 'view' ? 'VIEW' : 'TABLE'}</span></button><button className="structure-btn" onClick={() => void openTable(item.id, table, 'structure', database)} title="查看结构"><Settings2 size={13}/></button></div>)}</div>}</div>)}</> : <><div className="tree-section-label">表和视图</div>{(schema[item.id] || []).map(table => <div className="object-row" key={table.name}><button onClick={() => void openTable(item.id, table)}><Table2 size={14}/><span>{table.name}</span><span className="object-type">{table.type === 'view' ? 'VIEW' : 'TABLE'}</span></button><button className="structure-btn" onClick={() => void openTable(item.id, table, 'structure')} title="查看结构"><Settings2 size={13}/></button></div>)}</>}</div>}</div>)}</div>
-        {connections.length > 0 && <div className="sidebar-footer"><button onClick={() => { const item = connections.find(c => connected.includes(c.id)); if (item) void disconnect(item.id) }}><X size={14}/>断开当前连接</button></div>}
+        <div className="connection-list">{connections.length === 0 && <div className="empty-connect"><Database size={28}/><p>还没有连接</p><span>打开 SQLite 或连接 MySQL</span></div>}{connections.map(item => { const isConnected = connected.includes(item.id); const isDisconnecting = disconnecting.includes(item.id); return <div className="connection-block" key={item.id}><div className="connection-row"><button className="connection-main" disabled={isDisconnecting} onClick={() => void toggleConnection(item)} aria-expanded={isConnected ? !!expanded[item.id] : false} aria-label={`${item.name} ${isConnected ? '在线' : '离线'}`}><span className="chevron">{expanded[item.id] ? <ChevronDown size={15}/> : <ChevronRight size={15}/>}</span><CircleDot size={13} className={isConnected ? 'connected-dot' : 'offline-dot'}/><span className="tree-label">{item.name}</span><span className="object-type">{item.type === 'mysql' ? 'MYSQL' : 'SQLITE'}</span>{isConnected && <span className="connected-label">在线</span>}</button><div className="connection-actions">{item.type !== 'mysql' && <button className="readonly-control" type="button" disabled={isDisconnecting} title={item.readonly ? '只读连接' : '读写连接'} aria-label={item.readonly ? '只读连接' : '读写连接'} onClick={() => void toggleReadonly(item)}>{item.readonly ? <Lock size={12}/> : <span>RW</span>}</button>}{isConnected ? <button className="disconnect-control" type="button" disabled={isDisconnecting} title="断开连接" aria-label="断开连接" onClick={() => void disconnect(item.id)}><Unplug size={14}/></button> : <span className="disconnect-slot" aria-hidden="true"/>}</div></div>{expanded[item.id] && isConnected && <div className="tree-children">{item.type === 'mysql' ? <>{<div className="tree-section-label">数据库</div>}{(mysqlDatabases[item.id] || []).map(database => <div key={database}><button className="tree-row" onClick={() => { setSelectedDatabase(v => ({ ...v, [item.id]: database })); void loadSchema(item.id, database) }}><span className="chevron">{selectedDatabase[item.id] === database ? <ChevronDown size={13}/> : <ChevronRight size={13}/>}</span><Database size={13}/><span className="tree-label">{database}</span></button>{selectedDatabase[item.id] === database && <div className="tree-children"><div className="tree-section-label">表和视图</div>{(schema[`${item.id}|${database}`] || []).map(table => <div className="object-row" key={table.name}><button onClick={() => void openTable(item.id, table, 'table', database)}><Table2 size={14}/><span>{table.name}</span><span className="object-type">{table.type === 'view' ? 'VIEW' : 'TABLE'}</span></button><button className="structure-btn" onClick={() => void openTable(item.id, table, 'structure', database)} title="查看结构"><Settings2 size={13}/></button></div>)}</div>}</div>)}</> : <><div className="tree-section-label">表和视图</div>{(schema[item.id] || []).map(table => <div className="object-row" key={table.name}><button onClick={() => void openTable(item.id, table)}><Table2 size={14}/><span>{table.name}</span><span className="object-type">{table.type === 'view' ? 'VIEW' : 'TABLE'}</span></button><button className="structure-btn" onClick={() => void openTable(item.id, table, 'structure')} title="查看结构"><Settings2 size={13}/></button></div>)}</>}</div>}</div> })}</div>
       </aside>
       <main className="workspace">
         <div className="tabbar">{tabs.length === 0 && <div className="tabbar-placeholder">选择一个表，或打开 SQL 查询</div>}{tabs.map(tab => <button className={`tab ${tab.id === activeTab ? 'active' : ''}`} key={tab.id} onClick={() => { setActiveTab(tab.id); if (tab.kind === 'query') setSqlText(sqlByTab[tab.id] ?? tab.sql ?? '') }} onContextMenu={event => openTabContextMenu(event, tab.id)}><span className="tab-dot">{tab.kind === 'query' ? <Zap size={12}/> : tab.kind === 'structure' ? <Settings2 size={12}/> : <Table2 size={12}/>}</span><span>{tab.title}</span><X size={13} onClick={(event) => { event.stopPropagation(); closeTab(tab.id) }}/></button>)}<button className="new-query" onClick={newQuery}><Plus size={15}/>SQL</button></div>

@@ -27,6 +27,8 @@ SQLite 支持打开、创建、浏览和表格编辑。MySQL 支持主机、端�
 
 SQL 编辑器会按当前连接使用 SQLite 或 MySQL 方言，并将关键字以大写形式补全。输入关键字前缀后按 Tab 接受候选；没有候选时 Tab 继续执行缩进。按 ⌘ Enter 执行当前编辑器中的 SQL，执行按钮与快捷键使用相同的一次一条 SQL 规则。
 
+侧栏按连接显示断开按钮。在线连接行最右侧的断连图标只会断开该连接，悬停可查看“断开连接”提示；离线连接保留相同操作空间，便于长名称和多连接列表保持稳定布局。断开前会确认该连接标签中的未提交 SQLite 修改，确认后清理该连接的标签和缓存，其他连接保持不变。
+
 ## 回归验证
 
 ```bash
@@ -38,7 +40,7 @@ npm run test:app:mysql
 npm run test:app
 ```
 
-分别覆盖请求生命周期（退出、超时、异常消息）、真实 Electron utility process 的 SQLite 和本机 MySQL 8.4 通信，以及 BrowserWindow 中连接 MySQL、选择数据库、首次点击表和 SQL 编辑器快捷键的完整流程。配置测试覆盖 SQLite 符号链接重复合并、只读保留、MySQL 不同用户区分、配置备份和原子保存。MySQL 测试会在临时数据目录和端口启动隔离实例，创建临时数据库和账号后自动清理，不读取用户连接配置。界面测试还覆盖“新建连接”菜单、重复打开 SQLite/MySQL、SQLite 子菜单、MySQL 表单取消、文件选择取消、创建失败后恢复和重试，以及 SQLite/MySQL 的 Tab 补全和 ⌘ Enter 执行。
+分别覆盖请求生命周期（退出、超时、异常消息）、真实 Electron utility process 的 SQLite 和本机 MySQL 8.4 通信，以及 BrowserWindow 中连接 MySQL、选择数据库、首次点击表和 SQL 编辑器快捷键的完整流程。配置测试覆盖 SQLite 符号链接重复合并、只读保留、MySQL 不同用户区分、配置备份和原子保存。MySQL 测试会在临时数据目录和端口启动隔离实例，创建临时数据库和账号后自动清理，不读取用户连接配置。界面测试还覆盖“新建连接”菜单、重复打开 SQLite/MySQL、SQLite 子菜单、MySQL 表单取消、文件选择取消、创建失败后恢复和重试、按行断开并重连指定 SQLite/MySQL 连接，以及 SQLite/MySQL 的 Tab 补全和 ⌘ Enter 执行。
 
 打包后可复用同一界面测试验证 ASAR 中的程序和 SQLite 模块：
 
