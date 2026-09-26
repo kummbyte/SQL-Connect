@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react'
+import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import CodeMirror from '@uiw/react-codemirror'
 import { MySQL, SQLite, sql as sqlLanguage } from '@codemirror/lang-sql'
@@ -18,6 +18,21 @@ type ContextMenu = { x: number; y: number; tabId: string }
 
 const uid = () => crypto.randomUUID()
 const formatValue = (value: unknown) => value === null ? 'NULL' : typeof value === 'object' ? JSON.stringify(value) : String(value)
+function revealActiveTab(tabbar: HTMLDivElement | null) {
+  if (!tabbar) return
+  const active = tabbar.querySelector<HTMLElement>('.tab.active')
+  if (!active) return
+  const containerRect = tabbar.getBoundingClientRect()
+  const activeRect = active.getBoundingClientRect()
+  const visibleLeft = containerRect.left + tabbar.clientLeft
+  const visibleRight = visibleLeft + tabbar.clientWidth
+  const visibleWidth = visibleRight - visibleLeft
+  let scrollBy = 0
+  if (activeRect.width > visibleWidth || activeRect.left < visibleLeft) scrollBy = activeRect.left - visibleLeft
+  else if (activeRect.right > visibleRight) scrollBy = activeRect.right - visibleRight
+  if (!scrollBy) return
+  tabbar.scrollLeft = Math.max(0, Math.min(tabbar.scrollWidth - tabbar.clientWidth, tabbar.scrollLeft + scrollBy))
+}
 const errorText = (error: unknown) => {
   const message = error instanceof Error ? error.message : String(error)
   return message.replace(/^Error invoking remote method '[^']+': Error: /, '')
@@ -43,6 +58,8 @@ function App() {
   const [tabs, setTabs] = useState<Tab[]>([])
   const tabsRef = useRef<Tab[]>([])
   const [activeTab, setActiveTab] = useState<string | null>(null)
+  const [tabRevealRequest, setTabRevealRequest] = useState(0)
+  const tabbarRef = useRef<HTMLDivElement>(null)
   const [sqlText, setSqlText] = useState('SELECT name, type FROM sqlite_master WHERE type IN (\'table\', \'view\') ORDER BY type, name;')
   const [sqlByTab, setSqlByTab] = useState<Record<string, string>>({})
   const [results, setResults] = useState<Record<string, QueryResult>>({})
@@ -69,6 +86,14 @@ function App() {
   useEffect(() => { document.documentElement.dataset.theme = theme; localStorage.setItem('sql-connect-theme', theme) }, [theme])
   useEffect(() => { if (toast) { const timer = setTimeout(() => setToast(null), 3800); return () => clearTimeout(timer) } }, [toast])
   useEffect(() => { tabsRef.current = tabs }, [tabs])
+  useLayoutEffect(() => { revealActiveTab(tabbarRef.current) }, [activeTab, tabs.length, tabRevealRequest])
+  useEffect(() => {
+    const tabbar = tabbarRef.current
+    if (!tabbar || typeof ResizeObserver === 'undefined') return
+    const observer = new ResizeObserver(() => revealActiveTab(tabbar))
+    observer.observe(tabbar)
+    return () => observer.disconnect()
+  }, [])
   useEffect(() => {
     if (!contextMenu) return
     const close = () => setContextMenu(null)
@@ -277,7 +302,7 @@ function App() {
     if (saved && wasConnected && item.type !== 'mysql' && !disconnectingRef.current.has(item.id)) await connect(next)
   }
   async function openTable(connectionId: string, item: TableInfo, kind: Tab['kind'] = 'table', database?: string) {
-    const id = `${connectionId}:${database || ''}:${kind}:${item.name}`; const nextTab: Tab = { id, kind, title: item.name, table: item.name, connectionId, database }; setTabs(v => { const next = v.some(t => t.id === id) ? v : [...v, nextTab]; tabsRef.current = next; return next }); setActiveTab(id); setPage(0); setFilter(''); setSort({})
+    const id = `${connectionId}:${database || ''}:${kind}:${item.name}`; const nextTab: Tab = { id, kind, title: item.name, table: item.name, connectionId, database }; setTabs(v => { const next = v.some(t => t.id === id) ? v : [...v, nextTab]; tabsRef.current = next; return next }); setActiveTab(id); setTabRevealRequest(v => v + 1); setPage(0); setFilter(''); setSort({})
     if (kind === 'structure') { if (!structures[id]) setStructures(v => ({ ...v, [id]: undefined as never })); try { const structure = await window.sqlConnect.db.structure(connectionId, item.name, database); if (tabsRef.current.some(t => t.id === id)) setStructures(v => ({ ...v, [id]: structure })) } catch (error) { notify(error instanceof Error ? error.message : String(error), 'error') } }
     else await refreshTable({ tabId: id, connectionId, table: item.name, database }, { offset: 0, filter: '', orderBy: undefined, direction: undefined })
   }
@@ -386,7 +411,7 @@ function App() {
         </div>
       </aside>
       <main className="workspace">
-        <div className="tabbar">{tabs.length === 0 && <div className="tabbar-placeholder">选择一个表，或打开 SQL 查询</div>}{tabs.map(tab => <button className={`tab ${tab.id === activeTab ? 'active' : ''}`} key={tab.id} onClick={() => { setActiveTab(tab.id); if (tab.kind === 'query') setSqlText(sqlByTab[tab.id] ?? tab.sql ?? '') }} onContextMenu={event => openTabContextMenu(event, tab.id)}><span className="tab-dot">{tab.kind === 'query' ? <Zap size={12}/> : tab.kind === 'structure' ? <Settings2 size={12}/> : <Table2 size={12}/>}</span><span>{tab.title}</span><X size={13} onClick={(event) => { event.stopPropagation(); closeTab(tab.id) }}/></button>)}<button className="new-query" onClick={newQuery}><Plus size={15}/>SQL</button></div>
+        <div className="tabbar" ref={tabbarRef}>{tabs.length === 0 && <div className="tabbar-placeholder">选择一个表，或打开 SQL 查询</div>}{tabs.map(tab => <button className={`tab ${tab.id === activeTab ? 'active' : ''}`} key={tab.id} onClick={() => { setActiveTab(tab.id); setTabRevealRequest(v => v + 1); if (tab.kind === 'query') setSqlText(sqlByTab[tab.id] ?? tab.sql ?? '') }} onContextMenu={event => openTabContextMenu(event, tab.id)}><span className="tab-dot">{tab.kind === 'query' ? <Zap size={12}/> : tab.kind === 'structure' ? <Settings2 size={12}/> : <Table2 size={12}/>}</span><span>{tab.title}</span><X size={13} onClick={(event) => { event.stopPropagation(); closeTab(tab.id) }}/></button>)}<button className="new-query" onClick={newQuery}><Plus size={15}/>SQL</button></div>
         <div className="content-area">{active?.kind === 'structure' && <StructureView structure={structures[active.id]} />}{active?.kind === 'table' && result && <DataView tab={active} result={result} readonly={connections.find(c => c.id === activeConnection)?.readonly || connections.find(c => c.id === activeConnection)?.type === 'mysql'} filter={filter} setFilter={setFilter} page={page} setPage={setPage} sort={sort} setSort={setSort} onRefresh={() => active.table && void refreshTable({ tabId: active.id, connectionId: active.connectionId, table: active.table, database: active.database })} onEdit={updateCell} onAdd={() => addRow(active.id)} onDelete={deleteRow} changes={activeChanges} onCommit={() => void commit(active.id)} onDiscard={() => discard(active.id)} />}{active?.kind === 'query' && <QueryView sql={sqlText} setSql={handleSqlChange} onRun={runSql} loading={loading} result={result} database={activeDatabase} databases={mysqlDatabases[activeConnection] || []} dialect={connections.find(c => c.id === activeConnection)?.type === 'mysql' ? 'mysql' : 'sqlite'} setDatabase={database => { setSelectedDatabase(v => ({ ...v, [activeConnection]: database })); setTabs(v => v.map(t => t.id === active.id ? { ...t, database } : t)) }} />}</div>
         <footer className="statusbar"><span><span className={`status-dot ${loading ? 'busy' : ''}`}></span>{loading ? '正在执行…' : activeConnection ? '已就绪' : '未连接数据库'}</span>{activeConnection && <span className="status-path">{connections.find(c => c.id === activeConnection)?.type === 'mysql' ? `${(connections.find(c => c.id === activeConnection) as MySQLConnection).host}:${(connections.find(c => c.id === activeConnection) as MySQLConnection).port}` : (connections.find(c => c.id === activeConnection) as any)?.path}</span>}<span className="status-spacer"/><span>UTF-8</span><span>SQL Connect 1.0</span></footer>
       </main>
