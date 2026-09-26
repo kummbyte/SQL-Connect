@@ -371,12 +371,12 @@ function App() {
                         <span className="chevron">{(expandedDatabases[item.id] || []).includes(database) ? <ChevronDown size={13}/> : <ChevronRight size={13}/>}</span><Database size={13}/><span className="tree-label">{database}</span>
                       </button>
                       {(expandedDatabases[item.id] || []).includes(database) && <div className="tree-children"><div className="tree-section-label">表和视图</div>{(schema[`${item.id}|${database}`] || []).map(table => <div className="object-row" key={table.name}>
-                        <button onClick={() => void openTable(item.id, table, 'table', database)}><Table2 size={14}/><span>{table.name}</span><span className="object-type">{table.type === 'view' ? 'VIEW' : 'TABLE'}</span></button>
+                        <button className="table-object-button" title={table.name} onClick={() => void openTable(item.id, table, 'table', database)}><Table2 className="table-object-icon" size={16}/><span className="table-object-name">{table.name}</span><span className="object-type table-object-type">{table.type === 'view' ? 'VIEW' : 'TABLE'}</span></button>
                         <button className="structure-btn" onClick={() => void openTable(item.id, table, 'structure', database)} title="查看结构"><Settings2 size={13}/></button>
                       </div>)}</div>}
                     </div>)}
                   </> : <><div className="tree-section-label">表和视图</div>{(schema[item.id] || []).map(table => <div className="object-row" key={table.name}>
-                    <button onClick={() => void openTable(item.id, table)}><Table2 size={14}/><span>{table.name}</span><span className="object-type">{table.type === 'view' ? 'VIEW' : 'TABLE'}</span></button>
+                    <button className="table-object-button" title={table.name} onClick={() => void openTable(item.id, table)}><Table2 className="table-object-icon" size={16}/><span className="table-object-name">{table.name}</span><span className="object-type table-object-type">{table.type === 'view' ? 'VIEW' : 'TABLE'}</span></button>
                     <button className="structure-btn" onClick={() => void openTable(item.id, table, 'structure')} title="查看结构"><Settings2 size={13}/></button>
                   </div>)}</>}
                 </div>}

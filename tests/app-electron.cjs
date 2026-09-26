@@ -63,6 +63,36 @@ app.whenReady().then(async () => {
     let connections = JSON.parse(readFileSync(join(directory, 'connections.json'), 'utf8'))
     assert.equal(connections.length, 1)
     assert.equal(connections[0].path, realpathSync(savePath))
+    const initialConnectionId = connections[0].id
+    await js(`window.sqlConnect.db.execute(${JSON.stringify(initialConnectionId)}, ${JSON.stringify('CREATE TABLE this_is_a_very_long_table_name_for_sidebar_layout_checks (id INTEGER PRIMARY KEY)')})`)
+    await js(`window.sqlConnect.db.execute(${JSON.stringify(initialConnectionId)}, ${JSON.stringify('CREATE VIEW layout_sidebar_view_with_long_name AS SELECT id FROM this_is_a_very_long_table_name_for_sidebar_layout_checks')})`)
+    await js('document.querySelector(".connection-block .disconnect-control").click()')
+    await until(() => js('!document.querySelector(".connection-block .connection-row")?.textContent.includes("在线")'), 'SQLite disconnects to reload the test schema')
+    await js('document.querySelector(".connection-block .connect-saved-btn").click()')
+    await until(() => js('Array.from(document.querySelectorAll(".object-row")).some(row => row.textContent.includes("layout_sidebar_view_with_long_name"))'), 'SQLite long table and view appear in sidebar')
+    const objectLayout = await js(`(() => {
+      const sidebar = document.querySelector('.sidebar'); sidebar.style.width = '230px'; sidebar.style.flex = 'none';
+      return ['this_is_a_very_long_table_name_for_sidebar_layout_checks', 'layout_sidebar_view_with_long_name'].map(name => {
+        const row = Array.from(document.querySelectorAll('.object-row')).find(item => item.querySelector('.table-object-name')?.textContent === name);
+        const icon = row.querySelector('.table-object-icon').getBoundingClientRect(); const label = row.querySelector('.table-object-name'); const labelRect = label.getBoundingClientRect();
+        const typeRect = row.querySelector('.table-object-type').getBoundingClientRect(); const structureRect = row.querySelector('.structure-btn').getBoundingClientRect();
+        return { name, iconWidth: icon.width, title: row.querySelector('.table-object-button').title, truncated: label.scrollWidth > label.clientWidth,
+          labelRight: labelRect.right, typeLeft: typeRect.left, typeRight: typeRect.right, structureLeft: structureRect.left, kind: row.querySelector('.table-object-type').textContent.trim() };
+      });
+    })()`)
+    assert.equal(objectLayout.length, 2)
+    for (const layout of objectLayout) {
+      assert.equal(layout.iconWidth, 16)
+      assert.equal(layout.title, layout.name)
+      assert.equal(layout.truncated, true)
+      assert.ok(layout.labelRight <= layout.typeLeft)
+      assert.ok(layout.typeRight <= layout.structureLeft)
+    }
+    assert.equal(objectLayout.find(item => item.kind === 'VIEW')?.name, 'layout_sidebar_view_with_long_name')
+    await js('document.querySelector(".top-actions button[title=切换主题]").click()')
+    assert.equal(await js('document.querySelector(".table-object-icon").getBoundingClientRect().width'), 16)
+    await js('document.querySelector(".top-actions button[title=切换主题]").click(); document.querySelector(".sidebar").style.width = ""; document.querySelector(".sidebar").style.flex = ""')
+    console.log('PASS: SQLite table and view icons stay fixed; long names truncate without overlapping type or structure controls')
     console.log('PASS: UI new database button → worker → saved connection → ready status')
     openPath = savePath
     await js('document.querySelector(".connection-menu-button").click()')

@@ -30,7 +30,7 @@ app.whenReady().then(async () => {
     execFileSync(mysqld, ['--initialize-insecure', '--datadir=' + directory, '--basedir=/opt/homebrew/opt/mysql@8.4'], { stdio: 'ignore' })
     server = spawn(mysqld, ['--no-defaults', '--datadir=' + directory, '--socket=' + socket, '--port=' + port, '--bind-address=127.0.0.1', '--skip-name-resolve', '--log-error=' + join(directory, 'error.log')], { stdio: 'ignore' })
     await waitForServer()
-    execFileSync(mysql, ['--protocol=socket', '--socket', socket, '-uroot', '-e', "CREATE DATABASE `flower_shop`; CREATE TABLE `flower_shop`.`items` (id INT PRIMARY KEY, name VARCHAR(50)); INSERT INTO `flower_shop`.`items` VALUES (1,'flower'); CREATE DATABASE `other_shop`; CREATE TABLE `other_shop`.`items` (id INT PRIMARY KEY, name VARCHAR(50)); INSERT INTO `other_shop`.`items` VALUES (2,'other'); CREATE USER 'sqlconnect'@'127.0.0.1' IDENTIFIED BY 'secret'; GRANT ALL ON `flower_shop`.* TO 'sqlconnect'@'127.0.0.1'; GRANT ALL ON `other_shop`.* TO 'sqlconnect'@'127.0.0.1'; FLUSH PRIVILEGES;"], { stdio: 'ignore' })
+    execFileSync(mysql, ['--protocol=socket', '--socket', socket, '-uroot', '-e', "CREATE DATABASE `flower_shop`; CREATE TABLE `flower_shop`.`items` (id INT PRIMARY KEY, name VARCHAR(50)); INSERT INTO `flower_shop`.`items` VALUES (1,'flower'); CREATE TABLE `flower_shop`.`this_is_a_very_long_table_name_for_sidebar_layout_checks` (id INT PRIMARY KEY); CREATE VIEW `flower_shop`.`layout_sidebar_view_with_long_name` AS SELECT id, name FROM `flower_shop`.`items`; CREATE DATABASE `other_shop`; CREATE TABLE `other_shop`.`items` (id INT PRIMARY KEY, name VARCHAR(50)); INSERT INTO `other_shop`.`items` VALUES (2,'other'); CREATE USER 'sqlconnect'@'127.0.0.1' IDENTIFIED BY 'secret'; GRANT ALL ON `flower_shop`.* TO 'sqlconnect'@'127.0.0.1'; GRANT ALL ON `other_shop`.* TO 'sqlconnect'@'127.0.0.1'; FLUSH PRIVILEGES;"], { stdio: 'ignore' })
     require(join(root, 'out/main/index.js'))
     await until(() => BrowserWindow.getAllWindows().length > 0, 'window created')
     const window = BrowserWindow.getAllWindows()[0]
@@ -55,6 +55,32 @@ app.whenReady().then(async () => {
     assert.equal(await js('Array.from(document.querySelectorAll(".connection-database-tree > div")).find(section => section.querySelector(".tree-row")?.textContent.trim() === "flower_shop")?.querySelector(".object-row")'), null)
     await js('Array.from(document.querySelectorAll(".tree-row")).find(row => row.textContent.trim() === "flower_shop").click()')
     await until(() => js('Array.from(document.querySelectorAll(".object-row")).some(row => row.textContent.includes("items"))'), 'items table listed')
+    const objectLayout = await js(`(() => {
+      const sidebar = document.querySelector('.sidebar'); sidebar.style.width = '230px'; sidebar.style.flex = 'none';
+      return ['this_is_a_very_long_table_name_for_sidebar_layout_checks', 'layout_sidebar_view_with_long_name'].map(name => {
+        const row = Array.from(document.querySelectorAll('.object-row')).find(item => item.querySelector('.table-object-name')?.textContent === name);
+        const icon = row.querySelector('.table-object-icon').getBoundingClientRect();
+        const label = row.querySelector('.table-object-name'); const labelRect = label.getBoundingClientRect();
+        const typeRect = row.querySelector('.table-object-type').getBoundingClientRect();
+        const structureRect = row.querySelector('.structure-btn').getBoundingClientRect();
+        return { name, iconWidth: icon.width, title: row.querySelector('.table-object-button').title, truncated: label.scrollWidth > label.clientWidth,
+          labelRight: labelRect.right, typeLeft: typeRect.left, typeRight: typeRect.right, structureLeft: structureRect.left,
+          kind: row.querySelector('.table-object-type').textContent.trim() };
+      });
+    })()`)
+    assert.equal(objectLayout.length, 2)
+    for (const layout of objectLayout) {
+      assert.equal(layout.iconWidth, 16)
+      assert.equal(layout.title, layout.name)
+      assert.equal(layout.truncated, true)
+      assert.ok(layout.labelRight <= layout.typeLeft)
+      assert.ok(layout.typeRight <= layout.structureLeft)
+    }
+    assert.equal(objectLayout.find(item => item.kind === 'VIEW')?.name, 'layout_sidebar_view_with_long_name')
+    const lightObjectLayout = await js(`(() => { document.querySelector('.top-actions button[title="切换主题"]').click(); return document.querySelector('.table-object-icon').getBoundingClientRect().width })()`)
+    assert.equal(lightObjectLayout, 16)
+    await js('document.querySelector(".top-actions button[title=切换主题]").click(); document.querySelector(".sidebar").style.width = ""; document.querySelector(".sidebar").style.flex = ""')
+    console.log('PASS: MySQL table and view icons stay fixed; long names truncate without colliding with type or structure controls')
     await js('Array.from(document.querySelectorAll(".object-row > button:first-child")).find(button => button.textContent.includes("items")).click()')
     await until(() => js('document.querySelectorAll(".table-wrap input")[1]?.value === "flower"'), 'first table query includes selected database')
     assert.equal(await js('document.querySelector(".toast.error")?.textContent.includes("请选择一个数据库") || false'), false)
