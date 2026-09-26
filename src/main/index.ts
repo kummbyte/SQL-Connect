@@ -90,6 +90,21 @@ function saveSettingsInternal(connections: Connection[], backup = false) {
   savedConnections = merged.connections
   return savedConnections
 }
+function deleteSavedConnection(connectionId: string) {
+  ensureSettingsLoaded()
+  const connection = savedConnections.find(item => item.id === connectionId)
+  if (!connection) throw new Error('连接不存在或已删除')
+  if (pendingConnects.has(connectionIdentity(connection))) throw new Error('连接正在建立，请稍后再删除')
+  const remaining = savedConnections.filter(item => item.id !== connectionId)
+  const output = remaining.map(item => rawSettings.get(item.id) || item)
+  // Persist first so a filesystem failure leaves the live connection and credentials intact.
+  writeSettingsFile(output)
+  savedConnections = remaining
+  rawSettings.delete(connectionId)
+  sessionPasswords.delete(connectionId)
+  workers.get(connectionId)?.close('已删除保存的连接')
+  return savedConnections
+}
 function sendWorker(connectionId: string, type: string, payload: any) {
   const worker = workers.get(connectionId)
   if (!worker) return Promise.reject(new Error('连接已断开'))
@@ -146,6 +161,10 @@ function loadSettings(): Connection[] {
 function registerIpc() {
   ipcMain.handle('settings:load', () => loadSettings())
   ipcMain.handle('settings:save', (_event, connections: Connection[]) => { ensureSettingsLoaded(); return saveSettingsInternal(connections) })
+  ipcMain.handle('settings:removeConnection', (_event, connectionId: string) => {
+    try { deleteSavedConnection(String(connectionId)); return { ok: true } }
+    catch (error) { return { ok: false, error: error instanceof Error ? error.message : String(error) } }
+  })
   ipcMain.handle('dialog:openFile', async () => { const result = await dialog.showOpenDialog(win, { properties: ['openFile'], filters: [{ name: 'SQLite database', extensions: ['db', 'sqlite', 'sqlite3'] }, { name: 'All files', extensions: ['*'] }] }); return result.canceled ? null : result.filePaths[0] })
   ipcMain.handle('dialog:openCertificate', async () => { const result = await dialog.showOpenDialog(win, { properties: ['openFile'], filters: [{ name: 'Certificate', extensions: ['pem', 'crt', 'cer'] }, { name: 'All files', extensions: ['*'] }] }); return result.canceled ? null : result.filePaths[0] })
   ipcMain.handle('dialog:saveFile', async () => { const result = await dialog.showSaveDialog(win, { defaultPath: 'database.sqlite', filters: [{ name: 'SQLite database', extensions: ['sqlite', 'db'] }] }); return result.canceled ? null : result.filePath })

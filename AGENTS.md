@@ -62,9 +62,9 @@ npm run dist
 
 - `npm test`：请求关联、数据库错误、子进程崩溃、超时、无效响应、发送失败和取消的生命周期测试。
 - `npm run test:electron`：真实 Electron utility process 创建中文路径数据库，执行 SQL、读取表、重新连接和验证错误路径。
-- `npm run test:app`：先构建，再验证“新建连接”菜单、SQLite 子菜单、MySQL 表单取消、Esc 关闭、创建数据库、保存连接、失败提示、文件选择取消和重试，以及 SQLite SQL 编辑器的 Tab 补全和 ⌘ Enter 执行。文件选择器返回值由测试替身提供，不能据此宣称原生对话框交互已人工验收。
-- `npm run test:app:mysql`：在隔离 MySQL 8.4 实例中验证多数据库表浏览、同名表上下文、重复连接复用、无密码重连提示、密码保存后重连，以及 MySQL SQL 编辑器的 Tab 补全和 ⌘ Enter 执行。
-- `npm run test:settings`：使用独立配置验证 SQLite 符号链接重复合并、只读保留、MySQL 不同用户区分、配置备份和原子保存。
+- `npm run test:app`：先构建，再验证“新建连接”菜单、SQLite 子菜单、MySQL 表单取消、Esc 关闭、创建数据库、保存连接、失败提示、文件选择取消和重试，在线/离线连接删除确认与数据库文件保留，以及 SQLite SQL 编辑器的 Tab 补全和 ⌘ Enter 执行。文件选择器返回值由测试替身提供，不能据此宣称原生对话框交互已人工验收。
+- `npm run test:app:mysql`：在隔离 MySQL 8.4 实例中验证多数据库表浏览、同名表上下文、重复连接复用、无密码重连提示、连接信息独立折叠、数据库树根级对齐、在线删除，以及 MySQL SQL 编辑器的 Tab 补全和 ⌘ Enter 执行。
+- `npm run test:settings`：使用独立配置验证 SQLite 符号链接重复合并、只读保留、MySQL 不同用户区分、配置备份、原子保存和按 ID 删除连接。
 - 涉及 worker、IPC 或原生模块的修改，不能只运行类型检查、构建或普通 Node 子进程测试；必须覆盖真实 Electron 通信。
 - 涉及打包路径、preload 或 SQLite 模块时，还应验证打包内容：
 
@@ -172,3 +172,17 @@ process.on('message', request => handle(request))
 - 断开前检查该连接标签的未提交修改；取消确认会保留连接、标签和缓存，确认后等待 MySQL 查询会话释放，再关闭连接并清理目标连接的标签、结果、结构、SQL 文本、暂存修改和数据库树缓存。其他连接及其标签保持不变，当前标签按相邻标签规则切换。
 - SQLite 只读/读写切换复用同一断开确认流程，取消时不保存权限变化也不重连。断开失败只显示错误并保留该连接状态。
 - `tests/app-electron.cjs` 覆盖多 SQLite 连接的目标行断开、重连和旧底部入口移除；`tests/app-mysql-electron.cjs` 覆盖隔离 MySQL 连接的断开、重新输入密码后重连及数据库树恢复。
+
+### 已保存连接详情与手动连接
+
+- 点击连接行只切换展开状态；即使离线也可查看已保存信息。展开区展示 SQLite 文件路径、只读/读写状态，或 MySQL 主机、端口、用户名、TLS 和 CA 路径，不渲染密码。
+- 离线连接在详情区通过“连接”按钮显式启动，重复请求期间按钮禁用。连接失败保留详情和重试入口；MySQL 未保存密码时继续使用密码表单。连接成功后详情上方显示配置、下方显示数据库树。
+- 断开后保留目标连接展开，以便查看信息和重新连接；行展开状态不依赖在线状态。
+- `tests/app-electron.cjs` 验证离线 SQLite 展开不会连接、连接详情、长路径换行、深浅主题、键盘连接和重新连接；`tests/app-mysql-electron.cjs` 验证 MySQL 主机配置、认证失败后重试及数据库树恢复。
+
+### 已保存连接删除与信息折叠
+
+- 在线或离线连接均可删除，每次都会确认；提示仅删除连接配置，不删除 SQLite 文件或 MySQL 数据。有未提交修改时同时列出目标标签并要求确认放弃。
+- 删除通过 `settings:removeConnection` 按连接 ID 执行。主进程先原子保存剩余配置，成功后关闭该连接 worker 并移除内存中的密码与配置缓存；写入失败时保留原连接。
+- 在线连接信息可独立折叠，默认收起，数据库树保持展开；数据库树根级标题不再多缩进，表和视图保留层级缩进。
+- `tests/app-electron.cjs` 覆盖在线/离线删除确认、SQLite 文件保留及其他在线连接保留；`tests/app-mysql-electron.cjs` 覆盖在线 MySQL 删除、信息折叠与数据库树对齐；`tests/settings-electron.cjs` 覆盖按 ID 删除配置。

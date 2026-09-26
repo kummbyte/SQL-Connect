@@ -14,7 +14,7 @@ export type QueryResult = { columns: string[]; rows: Record<string, unknown>[]; 
 export type PendingChange = { type: 'insert' | 'update' | 'delete'; table: string; rowid?: number | string; values: Record<string, unknown>; original?: Record<string, unknown> }
 
 export type SqlConnectApi = {
-  settings: { load: () => Promise<Connection[]>; save: (connections: Connection[]) => Promise<Connection[]> }
+  settings: { load: () => Promise<Connection[]>; save: (connections: Connection[]) => Promise<Connection[]>; remove: (connectionId: string) => Promise<{ ok: true } | { ok: false; error: string }> }
   dialog: { openFile: () => Promise<string | null>; openCertificate: () => Promise<string | null>; saveFile: () => Promise<string | null> }
   db: {
     connect: (connection: Connection) => Promise<ConnectResult>
