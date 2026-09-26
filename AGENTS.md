@@ -63,7 +63,7 @@ npm run dist
 - `npm test`：请求关联、数据库错误、子进程崩溃、超时、无效响应、发送失败和取消的生命周期测试。
 - `npm run test:electron`：真实 Electron utility process 创建中文路径数据库，执行 SQL、读取表、重新连接和验证错误路径。
 - `npm run test:app`：先构建，再验证“新建连接”菜单、SQLite 子菜单、MySQL 表单取消、Esc 关闭、创建数据库、保存连接、失败提示、文件选择取消和重试，在线/离线连接删除确认与数据库文件保留，以及 SQLite SQL 编辑器的 Tab 补全和 ⌘ Enter 执行。文件选择器返回值由测试替身提供，不能据此宣称原生对话框交互已人工验收。
-- `npm run test:app:mysql`：在隔离 MySQL 8.4 实例中验证多数据库表浏览、同名表上下文、重复连接复用、无密码重连提示、连接信息独立折叠、数据库树根级对齐、在线删除，以及 MySQL SQL 编辑器的 Tab 补全和 ⌘ Enter 执行。
+- `npm run test:app:mysql`：在隔离 MySQL 8.4 实例中验证多数据库表浏览、同名表上下文、多个数据库节点独立展开和收起、默认查询数据库选择、重复连接复用、无密码重连提示、连接信息独立折叠、数据库树根级对齐、在线删除，以及 MySQL SQL 编辑器的 Tab 补全和 ⌘ Enter 执行。
 - `npm run test:settings`：使用独立配置验证 SQLite 符号链接重复合并、只读保留、MySQL 不同用户区分、配置备份、原子保存和按 ID 删除连接。
 - 涉及 worker、IPC 或原生模块的修改，不能只运行类型检查、构建或普通 Node 子进程测试；必须覆盖真实 Electron 通信。
 - 涉及打包路径、preload 或 SQLite 模块时，还应验证打包内容：
@@ -186,3 +186,9 @@ process.on('message', request => handle(request))
 - 删除通过 `settings:removeConnection` 按连接 ID 执行。主进程先原子保存剩余配置，成功后关闭该连接 worker 并移除内存中的密码与配置缓存；写入失败时保留原连接。
 - 在线连接信息可独立折叠，默认收起，数据库树保持展开；数据库树根级标题不再多缩进，表和视图保留层级缩进。
 - `tests/app-electron.cjs` 覆盖在线/离线删除确认、SQLite 文件保留及其他在线连接保留；`tests/app-mysql-electron.cjs` 覆盖在线 MySQL 删除、信息折叠与数据库树对齐；`tests/settings-electron.cjs` 覆盖按 ID 删除配置。
+
+### MySQL 多数据库节点展开
+
+- 数据库树展开状态按连接 ID 和数据库名独立记录，展开一个数据库不会收起其他库，再次点击可收起当前库；断开或删除连接时清理其展开状态。
+- 展开数据库会更新新建 SQL 查询的默认库；收起节点时保留最近一次选择，已有 SQL 和表格标签继续使用自身上下文。表与视图标签互不影响数据库节点的展开状态。
+- `tests/app-mysql-electron.cjs` 使用隔离 MySQL 8.4 双库验证同一节点折叠/展开、多库同时展开、数据库上下文和同名表查询结果。

@@ -36,6 +36,8 @@ function App() {
   const [schema, setSchema] = useState<Record<string, TableInfo[]>>({})
   const [mysqlDatabases, setMysqlDatabases] = useState<Record<string, string[]>>({})
   const [selectedDatabase, setSelectedDatabase] = useState<Record<string, string>>({})
+  const [expandedDatabases, setExpandedDatabases] = useState<Record<string, string[]>>({})
+  const expandedDatabasesRef = useRef<Record<string, string[]>>({})
   const [expanded, setExpanded] = useState<Record<string, boolean>>({})
   const [connectionInfoExpanded, setConnectionInfoExpanded] = useState<Record<string, boolean>>({})
   const [tabs, setTabs] = useState<Tab[]>([])
@@ -116,6 +118,21 @@ function App() {
 
   const persist = async (next: Connection[]) => { try { const saved = await window.sqlConnect.settings.save(next); setConnections(saved); return true } catch (error) { notify(error instanceof Error ? error.message : String(error), 'error'); return false } }
   const notify = (text: string, type: Toast['type'] = 'info') => setToast({ text, type })
+  function storeExpandedDatabases(connectionId: string, databases: string[]) {
+    const next = { ...expandedDatabasesRef.current }
+    if (databases.length) next[connectionId] = [...new Set(databases)]
+    else delete next[connectionId]
+    expandedDatabasesRef.current = next
+    setExpandedDatabases(next)
+  }
+  function toggleDatabase(connectionId: string, database: string) {
+    const currentlyExpanded = expandedDatabasesRef.current[connectionId] || []
+    const isExpanded = currentlyExpanded.includes(database)
+    storeExpandedDatabases(connectionId, isExpanded ? currentlyExpanded.filter(name => name !== database) : [...currentlyExpanded, database])
+    if (isExpanded) return
+    setSelectedDatabase(v => ({ ...v, [connectionId]: database }))
+    void loadSchema(connectionId, database)
+  }
 
   async function addConnection(create = false) {
     const path = create ? await window.sqlConnect.dialog.saveFile() : await window.sqlConnect.dialog.openFile()
@@ -143,7 +160,7 @@ function App() {
         const names = await window.sqlConnect.db.databases(saved.id)
         setMysqlDatabases(v => ({ ...v, [saved.id]: names }))
         const db = saved.database || names[0]
-        if (db) { setSelectedDatabase(v => ({ ...v, [saved.id]: db })); await loadSchema(saved.id, db) }
+        if (db) { setSelectedDatabase(v => ({ ...v, [saved.id]: db })); storeExpandedDatabases(saved.id, [db]); await loadSchema(saved.id, db) }
       } else {
         const items = await window.sqlConnect.db.schema(saved.id)
         setSchema(v => ({ ...v, [saved.id]: items }))
@@ -174,7 +191,7 @@ function App() {
       try {
         const names = await window.sqlConnect.db.databases(item.id)
         if (!deletedConnectionIdsRef.current.has(item.id)) setMysqlDatabases(v => ({ ...v, [item.id]: names }))
-        if (names[0]) { setSelectedDatabase(v => ({ ...v, [item.id]: names[0] })); await loadSchema(item.id, names[0]) }
+        if (names[0] && !deletedConnectionIdsRef.current.has(item.id)) { setSelectedDatabase(v => ({ ...v, [item.id]: names[0] })); storeExpandedDatabases(item.id, [names[0]]); await loadSchema(item.id, names[0]) }
       } catch (error) { notify(error instanceof Error ? error.message : String(error), 'error') }
     }
   }
@@ -187,6 +204,7 @@ function App() {
     setConnected(v => v.filter(item => item !== id))
     setExpanded(v => ({ ...v, [id]: true }))
     setSelectedDatabase(v => { const copy = { ...v }; delete copy[id]; return copy })
+    const expandedCopy = { ...expandedDatabasesRef.current }; delete expandedCopy[id]; expandedDatabasesRef.current = expandedCopy; setExpandedDatabases(expandedCopy)
     setSchema(v => { const copy = { ...v }; Object.keys(copy).filter(k => k === id || k.startsWith(`${id}|`)).forEach(k => delete copy[k]); return copy })
     setMysqlDatabases(v => { const copy = { ...v }; delete copy[id]; return copy })
     setTabs(remaining); tabsRef.current = remaining; setActiveTab(nextActive)
@@ -349,10 +367,10 @@ function App() {
                   {item.type === 'mysql' ? <>
                     <div className="tree-section-label">数据库</div>
                     {(mysqlDatabases[item.id] || []).map(database => <div key={database}>
-                      <button className="tree-row" onClick={() => { setSelectedDatabase(v => ({ ...v, [item.id]: database })); void loadSchema(item.id, database) }}>
-                        <span className="chevron">{selectedDatabase[item.id] === database ? <ChevronDown size={13}/> : <ChevronRight size={13}/>}</span><Database size={13}/><span className="tree-label">{database}</span>
+                      <button className="tree-row" aria-expanded={(expandedDatabases[item.id] || []).includes(database)} onClick={() => toggleDatabase(item.id, database)}>
+                        <span className="chevron">{(expandedDatabases[item.id] || []).includes(database) ? <ChevronDown size={13}/> : <ChevronRight size={13}/>}</span><Database size={13}/><span className="tree-label">{database}</span>
                       </button>
-                      {selectedDatabase[item.id] === database && <div className="tree-children"><div className="tree-section-label">表和视图</div>{(schema[`${item.id}|${database}`] || []).map(table => <div className="object-row" key={table.name}>
+                      {(expandedDatabases[item.id] || []).includes(database) && <div className="tree-children"><div className="tree-section-label">表和视图</div>{(schema[`${item.id}|${database}`] || []).map(table => <div className="object-row" key={table.name}>
                         <button onClick={() => void openTable(item.id, table, 'table', database)}><Table2 size={14}/><span>{table.name}</span><span className="object-type">{table.type === 'view' ? 'VIEW' : 'TABLE'}</span></button>
                         <button className="structure-btn" onClick={() => void openTable(item.id, table, 'structure', database)} title="查看结构"><Settings2 size={13}/></button>
                       </div>)}</div>}
