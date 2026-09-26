@@ -61,26 +61,33 @@ app.whenReady().then(async () => {
         const row = Array.from(document.querySelectorAll('.object-row')).find(item => item.querySelector('.table-object-name')?.textContent === name);
         const icon = row.querySelector('.table-object-icon').getBoundingClientRect();
         const label = row.querySelector('.table-object-name'); const labelRect = label.getBoundingClientRect();
-        const typeRect = row.querySelector('.table-object-type').getBoundingClientRect();
         const structureRect = row.querySelector('.structure-btn').getBoundingClientRect();
-        return { name, iconWidth: icon.width, title: row.querySelector('.table-object-button').title, truncated: label.scrollWidth > label.clientWidth,
-          labelRight: labelRect.right, typeLeft: typeRect.left, typeRight: typeRect.right, structureLeft: structureRect.left,
-          kind: row.querySelector('.table-object-type').textContent.trim() };
+        const button = row.querySelector('.table-object-button');
+        return { name, iconWidth: icon.width, title: button.title, ariaLabel: button.getAttribute('aria-label'), structureLabel: row.querySelector('.structure-btn').getAttribute('aria-label'),
+          truncated: label.scrollWidth > label.clientWidth, labelWidth: labelRect.width, labelRight: labelRect.right, structureLeft: structureRect.left,
+          hasTypeText: !!row.querySelector('.table-object-type'), rowText: row.textContent.trim() };
       });
     })()`)
     assert.equal(objectLayout.length, 2)
     for (const layout of objectLayout) {
       assert.equal(layout.iconWidth, 16)
-      assert.equal(layout.title, layout.name)
+      const kind = layout.name === 'layout_sidebar_view_with_long_name' ? '视图' : '表'
+      assert.equal(layout.title, `${kind}：${layout.name}`)
+      assert.equal(layout.ariaLabel, `打开${kind} ${layout.name}`)
+      assert.equal(layout.structureLabel, `查看${kind} ${layout.name}的结构`)
+      assert.equal(layout.hasTypeText, false)
+      assert.equal(layout.rowText, layout.name)
       assert.equal(layout.truncated, true)
-      assert.ok(layout.labelRight <= layout.typeLeft)
-      assert.ok(layout.typeRight <= layout.structureLeft)
+      assert.ok(layout.labelWidth > 20)
+      assert.ok(layout.labelRight <= layout.structureLeft)
     }
-    assert.equal(objectLayout.find(item => item.kind === 'VIEW')?.name, 'layout_sidebar_view_with_long_name')
+    assert.equal(await js('getComputedStyle(document.querySelector(".connection-expanded")).paddingLeft'), '12px')
+    assert.equal(await js('getComputedStyle(document.querySelector(".connection-database-tree .tree-children")).paddingLeft'), '10px')
+    assert.equal(await js('getComputedStyle(document.querySelector(".connection-database-tree .tree-children")).marginLeft'), '8px')
     const lightObjectLayout = await js(`(() => { document.querySelector('.top-actions button[title="切换主题"]').click(); return document.querySelector('.table-object-icon').getBoundingClientRect().width })()`)
     assert.equal(lightObjectLayout, 16)
     await js('document.querySelector(".top-actions button[title=切换主题]").click(); document.querySelector(".sidebar").style.width = ""; document.querySelector(".sidebar").style.flex = ""')
-    console.log('PASS: MySQL table and view icons stay fixed; long names truncate without colliding with type or structure controls')
+    console.log('PASS: MySQL table and view rows use fixed icons, hide type text, preserve compact indentation, and truncate names before structure controls')
     await js('Array.from(document.querySelectorAll(".object-row > button:first-child")).find(button => button.textContent.includes("items")).click()')
     await until(() => js('document.querySelectorAll(".table-wrap input")[1]?.value === "flower"'), 'first table query includes selected database')
     assert.equal(await js('document.querySelector(".toast.error")?.textContent.includes("请选择一个数据库") || false'), false)
