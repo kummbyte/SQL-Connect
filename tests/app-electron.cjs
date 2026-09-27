@@ -89,11 +89,18 @@ app.whenReady().then(async () => {
       const short = byName('id'), long = byName('a_very_long_field_name_for_auto_width_check'), chinese = byName('中文字段名');
       const label = chinese.querySelector('.grid-header-label').getBoundingClientRect(), bounds = chinese.getBoundingClientRect();
       const handle = long.querySelector('.column-resize-handle').getBoundingClientRect();
-      return { widths: [short, long, chinese].map(th => th.getBoundingClientRect().width), centered: Math.abs((label.left + label.right) / 2 - (bounds.left + bounds.right) / 2) < 2, handle: { x: handle.left + handle.width / 2, y: handle.top + handle.height / 2 }, widthBefore: long.getBoundingClientRect().width, handleCount: document.querySelectorAll('.table-wrap .column-resize-handle').length };
+      const wrap = document.querySelector('.table-wrap'), table = wrap.querySelector('table'), wrapBounds = wrap.getBoundingClientRect(), tableBounds = table.getBoundingClientRect();
+      return { widths: [short, long, chinese].map(th => th.getBoundingClientRect().width), headerAlignedLeft: getComputedStyle(chinese.querySelector('.grid-header-label')).justifyContent === 'flex-start' && Math.abs(chinese.querySelector('.grid-header-name').getBoundingClientRect().left - (chinese.querySelector('.grid-header-label').getBoundingClientRect().left + 12)) < 2, borderGap: wrapBounds.right - tableBounds.right, wrapperWidth: wrapBounds.width, availableWidth: wrap.parentElement.clientWidth, handle: { x: handle.left + handle.width / 2, y: handle.top + handle.height / 2 }, widthBefore: long.getBoundingClientRect().width, handleCount: document.querySelectorAll('.table-wrap .column-resize-handle').length };
     })()`)
     assert.ok(tableGridMetrics.widths[1] > tableGridMetrics.widths[0])
-    assert.equal(tableGridMetrics.centered, true)
+    assert.equal(tableGridMetrics.headerAlignedLeft, true)
+    assert.ok(tableGridMetrics.borderGap <= 2)
+    assert.ok(tableGridMetrics.wrapperWidth < tableGridMetrics.availableWidth)
     assert.equal(tableGridMetrics.handleCount, 4)
+    await js('document.querySelector(".table-wrap").style.maxWidth = "320px"')
+    assert.ok(await js('document.querySelector(".table-wrap").clientWidth <= 320 && document.querySelector(".table-wrap").clientWidth >= 318'))
+    assert.ok(await js('document.querySelector(".table-wrap").scrollWidth > document.querySelector(".table-wrap").clientWidth'))
+    await js('document.querySelector(".table-wrap").style.maxWidth = ""')
     await dragPointer(window, tableGridMetrics.handle, { x: tableGridMetrics.handle.x + 30, y: tableGridMetrics.handle.y })
     await until(async () => Number(await js('Array.from(document.querySelectorAll(".table-wrap th")).find(th => th.textContent.includes("a_very_long_field_name_for_auto_width_check")).dataset.columnWidth')) > tableGridMetrics.widthBefore + 20, 'dragging SQLite column edge widens header and cells')
     const resizedSQLiteColumn = await js(`(() => { const th=Array.from(document.querySelectorAll('.table-wrap th')).find(item=>item.textContent.includes('a_very_long_field_name_for_auto_width_check')); const index=Array.from(th.parentElement.children).indexOf(th); const cell=document.querySelector('.table-wrap tbody tr')?.children[index]; return {width:Number(th.dataset.columnWidth),header:th.getBoundingClientRect().width,cell:cell?.getBoundingClientRect().width} })()`)
@@ -127,10 +134,13 @@ app.whenReady().then(async () => {
     await until(() => js('document.querySelectorAll(".result-table .column-resize-handle").length === 3'), 'SQL result fields render with resize handles')
     const sqlGridMetrics = await js(`(() => {
       const headers = Array.from(document.querySelectorAll('.result-table th')); const long = headers.find(th => th.textContent.includes('very_long_sql_result_field_name_for_width')); const short = headers.find(th => th.textContent.includes('short')); const label = long.querySelector('.grid-header-label').getBoundingClientRect(), bounds = long.getBoundingClientRect(); const handle = long.querySelector('.column-resize-handle').getBoundingClientRect();
-      return { shortWidth: Number(short.dataset.columnWidth), longWidth: Number(long.dataset.columnWidth), centered: Math.abs((label.left + label.right) / 2 - (bounds.left + bounds.right) / 2) < 2, handle: { x: handle.left + handle.width / 2, y: handle.top + handle.height / 2 } };
+      const wrap = document.querySelector('.result-table'), table = wrap.querySelector('table'), wrapBounds = wrap.getBoundingClientRect(), tableBounds = table.getBoundingClientRect();
+      return { shortWidth: Number(short.dataset.columnWidth), longWidth: Number(long.dataset.columnWidth), headerAlignedLeft: getComputedStyle(long.querySelector('.grid-header-label')).justifyContent === 'flex-start' && Math.abs(long.querySelector('.grid-header-name').getBoundingClientRect().left - (long.querySelector('.grid-header-label').getBoundingClientRect().left + 12)) < 2, borderGap: wrapBounds.right - tableBounds.right, wrapperWidth: wrapBounds.width, availableWidth: wrap.parentElement.clientWidth, handle: { x: handle.left + handle.width / 2, y: handle.top + handle.height / 2 } };
     })()`)
     assert.ok(sqlGridMetrics.longWidth > sqlGridMetrics.shortWidth)
-    assert.equal(sqlGridMetrics.centered, true)
+    assert.equal(sqlGridMetrics.headerAlignedLeft, true)
+    assert.ok(sqlGridMetrics.borderGap <= 2)
+    assert.ok(sqlGridMetrics.wrapperWidth < sqlGridMetrics.availableWidth)
     await dragPointer(window, sqlGridMetrics.handle, { x: sqlGridMetrics.handle.x + 30, y: sqlGridMetrics.handle.y })
     await until(async () => Number(await js('Array.from(document.querySelectorAll(".result-table th")).find(th => th.textContent.includes("very_long_sql_result_field_name_for_width")).dataset.columnWidth')) > sqlGridMetrics.longWidth + 20, 'SQL result column width changes by pointer drag')
     const sqlWidthAfterDrag = await js('Number(Array.from(document.querySelectorAll(".result-table th")).find(th => th.textContent.includes("very_long_sql_result_field_name_for_width")).dataset.columnWidth)')
@@ -147,7 +157,7 @@ app.whenReady().then(async () => {
     await until(() => js('document.querySelectorAll(".tab").length === 1'), 'close empty SQL tab')
     await js('document.querySelector(".tab.active > svg").dispatchEvent(new MouseEvent("click", { bubbles: true }))')
     await until(() => js('document.querySelectorAll(".tab").length === 0'), 'close SQLite grid tab')
-    console.log('PASS: SQL result grids center field names, calculate variable widths, and retain mouse adjustments while switching tabs')
+    console.log('PASS: SQL result grids left-align field names, fit their borders, and retain mouse adjustments while switching tabs')
     console.log('PASS: SQLite sorting reloads immediately, pagination follows sort/filter state, pending edits require confirmation, and column widths resize per tab')
     const objectLayout = await js(`(() => {
       const sidebar = document.querySelector('.sidebar'); sidebar.style.width = '230px'; sidebar.style.flex = 'none';
