@@ -34,6 +34,7 @@ app.whenReady().then(async () => {
     const js = code => window.webContents.executeJavaScript(code).catch(error => { console.error('Renderer script failed:', code, error); throw error })
     const activeTabMetrics = () => js(`(() => { const bar=document.querySelector('.tabbar'); const tab=bar?.querySelector('.tab.active'); if(!bar||!tab)return null; const b=bar.getBoundingClientRect(),t=tab.getBoundingClientRect(),left=b.left+bar.clientLeft,right=left+bar.clientWidth; return {visible:t.left>=left-1&&t.right<=right+1,scrollLeft:bar.scrollLeft,maxScroll:bar.scrollWidth-bar.clientWidth,scrollWidth:bar.scrollWidth,clientWidth:bar.clientWidth} })()`)
     await until(() => js('!!document.querySelector(".connection-menu-button")'), 'renderer mounted')
+    assert.equal(await js('document.querySelector(".statusbar")?.textContent.includes("SQL Connect 1.1")'), true)
     assert.equal(await js('!!document.querySelector(".welcome-actions")'), false)
     assert.equal(await js('document.querySelector(".sidebar-head h2")?.textContent'), '新建连接')
     assert.equal(await js('!!document.querySelector(".quick-actions")'), false)
@@ -90,10 +91,14 @@ app.whenReady().then(async () => {
       const label = chinese.querySelector('.grid-header-label').getBoundingClientRect(), bounds = chinese.getBoundingClientRect();
       const handle = long.querySelector('.column-resize-handle').getBoundingClientRect();
       const wrap = document.querySelector('.table-wrap'), table = wrap.querySelector('table'), wrapBounds = wrap.getBoundingClientRect(), tableBounds = table.getBoundingClientRect();
-      return { widths: [short, long, chinese].map(th => th.getBoundingClientRect().width), headerAlignedLeft: getComputedStyle(chinese.querySelector('.grid-header-label')).justifyContent === 'flex-start' && Math.abs(chinese.querySelector('.grid-header-name').getBoundingClientRect().left - (chinese.querySelector('.grid-header-label').getBoundingClientRect().left + 12)) < 2, borderGap: wrapBounds.right - tableBounds.right, wrapperWidth: wrapBounds.width, availableWidth: wrap.parentElement.clientWidth, handle: { x: handle.left + handle.width / 2, y: handle.top + handle.height / 2 }, widthBefore: long.getBoundingClientRect().width, handleCount: document.querySelectorAll('.table-wrap .column-resize-handle').length };
+      const bodyCell = document.querySelector('.table-wrap tbody tr')?.children[Array.from(chinese.parentElement.children).indexOf(chinese)];
+      return { widths: [short, long, chinese].map(th => th.getBoundingClientRect().width), headerAlignedLeft: getComputedStyle(chinese.querySelector('.grid-header-label')).justifyContent === 'flex-start' && Math.abs(chinese.querySelector('.grid-header-name').getBoundingClientRect().left - (chinese.querySelector('.grid-header-label').getBoundingClientRect().left + 8)) < 2, headerDivider: getComputedStyle(chinese).borderRightWidth === '1px' && getComputedStyle(chinese).borderRightStyle === 'solid', bodyDivider: getComputedStyle(bodyCell).borderRightWidth === '1px' && getComputedStyle(bodyCell).borderRightStyle === 'solid', borderGap: wrapBounds.right - tableBounds.right, wrapperWidth: wrapBounds.width, availableWidth: wrap.parentElement.clientWidth, handle: { x: handle.left + handle.width / 2, y: handle.top + handle.height / 2 }, widthBefore: long.getBoundingClientRect().width, handleCount: document.querySelectorAll('.table-wrap .column-resize-handle').length };
     })()`)
     assert.ok(tableGridMetrics.widths[1] > tableGridMetrics.widths[0])
+    assert.ok(tableGridMetrics.widths[0] < 96)
     assert.equal(tableGridMetrics.headerAlignedLeft, true)
+    assert.equal(tableGridMetrics.headerDivider, true)
+    assert.equal(tableGridMetrics.bodyDivider, true)
     assert.ok(tableGridMetrics.borderGap <= 2)
     assert.ok(tableGridMetrics.wrapperWidth < tableGridMetrics.availableWidth)
     assert.equal(tableGridMetrics.handleCount, 4)
@@ -113,7 +118,8 @@ app.whenReady().then(async () => {
     await until(() => js('document.querySelector(".table-footer")?.textContent.includes("第 1 页")'), 'SQLite previous page reloads')
     await js('document.querySelector(".table-wrap .grid-header-label")?.click()')
     await until(() => js('document.querySelector(".table-footer")?.textContent.includes("第 1 页")'), 'sorting resets to first page')
-    await js(`(() => { const input=document.querySelector('.search-box input'); const setter=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set; setter.call(input,'key-0'); input.dispatchEvent(new Event('input',{bubbles:true})); document.querySelector('.search-submit').click() })()`)
+    assert.equal(await js('document.querySelectorAll(".search-box svg").length'), 1)
+    await js(`(() => { const input=document.querySelector('.search-box input'); const setter=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set; setter.call(input,'key-0'); input.dispatchEvent(new Event('input',{bubbles:true})); input.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true})) })()`)
     await until(() => js('document.querySelector(".table-footer")?.textContent.includes("99 行")'), 'SQLite filter applies and updates the visible row count')
     await js('Array.from(document.querySelectorAll(".table-wrap th")).find(th => th.textContent.includes("id")).querySelector(".grid-header-label").click()')
     await until(() => js('document.querySelector(".table-footer")?.textContent.includes("99 行") && document.querySelector(".table-wrap tbody tr td:nth-child(2) input")?.value === "7"'), 'SQLite sorting preserves the active filter')
@@ -135,10 +141,14 @@ app.whenReady().then(async () => {
     const sqlGridMetrics = await js(`(() => {
       const headers = Array.from(document.querySelectorAll('.result-table th')); const long = headers.find(th => th.textContent.includes('very_long_sql_result_field_name_for_width')); const short = headers.find(th => th.textContent.includes('short')); const label = long.querySelector('.grid-header-label').getBoundingClientRect(), bounds = long.getBoundingClientRect(); const handle = long.querySelector('.column-resize-handle').getBoundingClientRect();
       const wrap = document.querySelector('.result-table'), table = wrap.querySelector('table'), wrapBounds = wrap.getBoundingClientRect(), tableBounds = table.getBoundingClientRect();
-      return { shortWidth: Number(short.dataset.columnWidth), longWidth: Number(long.dataset.columnWidth), headerAlignedLeft: getComputedStyle(long.querySelector('.grid-header-label')).justifyContent === 'flex-start' && Math.abs(long.querySelector('.grid-header-name').getBoundingClientRect().left - (long.querySelector('.grid-header-label').getBoundingClientRect().left + 12)) < 2, borderGap: wrapBounds.right - tableBounds.right, wrapperWidth: wrapBounds.width, availableWidth: wrap.parentElement.clientWidth, handle: { x: handle.left + handle.width / 2, y: handle.top + handle.height / 2 } };
+      const bodyCell = document.querySelector('.result-table tbody tr')?.children[Array.from(long.parentElement.children).indexOf(long)];
+      return { shortWidth: Number(short.dataset.columnWidth), longWidth: Number(long.dataset.columnWidth), headerAlignedLeft: getComputedStyle(long.querySelector('.grid-header-label')).justifyContent === 'flex-start' && Math.abs(long.querySelector('.grid-header-name').getBoundingClientRect().left - (long.querySelector('.grid-header-label').getBoundingClientRect().left + 8)) < 2, headerDivider: getComputedStyle(long).borderRightWidth === '1px' && getComputedStyle(long).borderRightStyle === 'solid', bodyDivider: getComputedStyle(bodyCell).borderRightWidth === '1px' && getComputedStyle(bodyCell).borderRightStyle === 'solid', borderGap: wrapBounds.right - tableBounds.right, wrapperWidth: wrapBounds.width, availableWidth: wrap.parentElement.clientWidth, handle: { x: handle.left + handle.width / 2, y: handle.top + handle.height / 2 } };
     })()`)
     assert.ok(sqlGridMetrics.longWidth > sqlGridMetrics.shortWidth)
+    assert.ok(sqlGridMetrics.shortWidth < 96)
     assert.equal(sqlGridMetrics.headerAlignedLeft, true)
+    assert.equal(sqlGridMetrics.headerDivider, true)
+    assert.equal(sqlGridMetrics.bodyDivider, true)
     assert.ok(sqlGridMetrics.borderGap <= 2)
     assert.ok(sqlGridMetrics.wrapperWidth < sqlGridMetrics.availableWidth)
     await dragPointer(window, sqlGridMetrics.handle, { x: sqlGridMetrics.handle.x + 30, y: sqlGridMetrics.handle.y })
