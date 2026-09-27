@@ -88,17 +88,22 @@ app.whenReady().then(async () => {
     const tableGridMetrics = await js(`(() => {
       const headers = Array.from(document.querySelectorAll('.table-wrap th')); const byName = name => headers.find(th => th.textContent.includes(name));
       const short = byName('id'), long = byName('a_very_long_field_name_for_auto_width_check'), chinese = byName('中文字段名');
-      const label = chinese.querySelector('.grid-header-label').getBoundingClientRect(), bounds = chinese.getBoundingClientRect();
+      const label = chinese.querySelector('.grid-header-label').getBoundingClientRect(), chineseName = chinese.querySelector('.grid-header-name'), bounds = chinese.getBoundingClientRect();
+      const longLabel = long.querySelector('.grid-header-label'), longName = long.querySelector('.grid-header-name'), longSort = long.querySelector('.sort-indicator');
+      const longLabelBounds = longLabel.getBoundingClientRect(), longNameBounds = longName.getBoundingClientRect(), longSortBounds = longSort.getBoundingClientRect();
       const handle = long.querySelector('.column-resize-handle').getBoundingClientRect();
       const wrap = document.querySelector('.table-wrap'), table = wrap.querySelector('table'), wrapBounds = wrap.getBoundingClientRect(), tableBounds = table.getBoundingClientRect();
       const bodyCell = document.querySelector('.table-wrap tbody tr')?.children[Array.from(chinese.parentElement.children).indexOf(chinese)];
-      return { widths: [short, long, chinese].map(th => th.getBoundingClientRect().width), headerAlignedLeft: getComputedStyle(chinese.querySelector('.grid-header-label')).justifyContent === 'flex-start' && Math.abs(chinese.querySelector('.grid-header-name').getBoundingClientRect().left - (chinese.querySelector('.grid-header-label').getBoundingClientRect().left + 8)) < 2, headerDivider: getComputedStyle(chinese).borderRightWidth === '1px' && getComputedStyle(chinese).borderRightStyle === 'solid', bodyDivider: getComputedStyle(bodyCell).borderRightWidth === '1px' && getComputedStyle(bodyCell).borderRightStyle === 'solid', borderGap: wrapBounds.right - tableBounds.right, wrapperWidth: wrapBounds.width, availableWidth: wrap.parentElement.clientWidth, handle: { x: handle.left + handle.width / 2, y: handle.top + handle.height / 2 }, widthBefore: long.getBoundingClientRect().width, handleCount: document.querySelectorAll('.table-wrap .column-resize-handle').length };
+      return { widths: [short, long, chinese].map(th => th.getBoundingClientRect().width), headerAlignedLeft: getComputedStyle(chinese.querySelector('.grid-header-label')).justifyContent === 'flex-start' && Math.abs(chineseName.getBoundingClientRect().left - (chinese.querySelector('.grid-header-label').getBoundingClientRect().left + 8)) < 2, headerDivider: getComputedStyle(chinese).borderRightWidth === '1px' && getComputedStyle(chinese).borderRightStyle === 'solid', bodyDivider: getComputedStyle(bodyCell).borderRightWidth === '1px' && getComputedStyle(bodyCell).borderRightStyle === 'solid', longTextOverflow: longName.scrollWidth > longName.clientWidth, longTextClip: getComputedStyle(longName).textOverflow === 'clip', longSortGap: longSortBounds.left - longNameBounds.right, longSortRightInset: longLabelBounds.right - longSortBounds.right, longHeaderTitle: longLabel.title === 'a_very_long_field_name_for_auto_width_check', borderGap: wrapBounds.right - tableBounds.right, wrapperWidth: wrapBounds.width, availableWidth: wrap.parentElement.clientWidth, handle: { x: handle.left + handle.width / 2, y: handle.top + handle.height / 2 }, widthBefore: long.getBoundingClientRect().width, handleCount: document.querySelectorAll('.table-wrap .column-resize-handle').length };
     })()`)
     assert.ok(tableGridMetrics.widths[1] > tableGridMetrics.widths[0])
     assert.ok(tableGridMetrics.widths[0] < 96)
     assert.equal(tableGridMetrics.headerAlignedLeft, true)
     assert.equal(tableGridMetrics.headerDivider, true)
     assert.equal(tableGridMetrics.bodyDivider, true)
+    assert.equal(tableGridMetrics.longTextClip, true)
+    assert.ok(Math.abs(tableGridMetrics.longSortRightInset - 12) < 2)
+    assert.equal(tableGridMetrics.longHeaderTitle, true)
     assert.ok(tableGridMetrics.borderGap <= 2)
     assert.ok(tableGridMetrics.wrapperWidth < tableGridMetrics.availableWidth)
     assert.equal(tableGridMetrics.handleCount, 4)
@@ -106,11 +111,22 @@ app.whenReady().then(async () => {
     assert.ok(await js('document.querySelector(".table-wrap").clientWidth <= 320 && document.querySelector(".table-wrap").clientWidth >= 318'))
     assert.ok(await js('document.querySelector(".table-wrap").scrollWidth > document.querySelector(".table-wrap").clientWidth'))
     await js('document.querySelector(".table-wrap").style.maxWidth = ""')
-    await dragPointer(window, tableGridMetrics.handle, { x: tableGridMetrics.handle.x + 30, y: tableGridMetrics.handle.y })
-    await until(async () => Number(await js('Array.from(document.querySelectorAll(".table-wrap th")).find(th => th.textContent.includes("a_very_long_field_name_for_auto_width_check")).dataset.columnWidth')) > tableGridMetrics.widthBefore + 20, 'dragging SQLite column edge widens header and cells')
-    const resizedSQLiteColumn = await js(`(() => { const th=Array.from(document.querySelectorAll('.table-wrap th')).find(item=>item.textContent.includes('a_very_long_field_name_for_auto_width_check')); const index=Array.from(th.parentElement.children).indexOf(th); const cell=document.querySelector('.table-wrap tbody tr')?.children[index]; return {width:Number(th.dataset.columnWidth),header:th.getBoundingClientRect().width,cell:cell?.getBoundingClientRect().width} })()`)
-    assert.ok(resizedSQLiteColumn.width > tableGridMetrics.widthBefore + 20)
-    assert.ok(resizedSQLiteColumn.cell > tableGridMetrics.widthBefore + 20)
+    await dragPointer(window, tableGridMetrics.handle, { x: tableGridMetrics.handle.x - 220, y: tableGridMetrics.handle.y })
+    await until(async () => Number(await js('Array.from(document.querySelectorAll(".table-wrap th")).find(th => th.textContent.includes("a_very_long_field_name_for_auto_width_check")).dataset.columnWidth')) < tableGridMetrics.widthBefore - 100, 'dragging SQLite column edge narrows the header')
+    const narrowSQLiteHeader = await js(`(() => { const th=Array.from(document.querySelectorAll('.table-wrap th')).find(item=>item.textContent.includes('a_very_long_field_name_for_auto_width_check')), label=th.querySelector('.grid-header-label'), labelBounds=label.getBoundingClientRect(), name=th.querySelector('.grid-header-name'), nameBounds=name.getBoundingClientRect(), icon=th.querySelector('.sort-indicator'), iconBounds=icon.getBoundingClientRect(); return {textOverflow:getComputedStyle(name).textOverflow,hasClippedText:name.scrollWidth>name.clientWidth,textIconGap:iconBounds.left-nameBounds.right,iconRightInset:labelBounds.right-iconBounds.right,fullTitle:label.title==='a_very_long_field_name_for_auto_width_check',handle:(()=>{const r=th.querySelector('.column-resize-handle').getBoundingClientRect();return{x:r.left+r.width/2,y:r.top+r.height/2}})(),width:Number(th.dataset.columnWidth)} })()`)
+    assert.equal(narrowSQLiteHeader.textOverflow, 'clip')
+    assert.equal(narrowSQLiteHeader.hasClippedText, true)
+    assert.ok(Math.abs(narrowSQLiteHeader.textIconGap - 4) < 2, JSON.stringify(narrowSQLiteHeader))
+    assert.ok(Math.abs(narrowSQLiteHeader.iconRightInset - 12) < 2)
+    assert.equal(narrowSQLiteHeader.fullTitle, true)
+    await dragPointer(window, narrowSQLiteHeader.handle, { x: narrowSQLiteHeader.handle.x + 30, y: narrowSQLiteHeader.handle.y })
+    await until(async () => Number(await js('Array.from(document.querySelectorAll(".table-wrap th")).find(th => th.textContent.includes("a_very_long_field_name_for_auto_width_check")).dataset.columnWidth')) > narrowSQLiteHeader.width + 20, 'dragging SQLite column edge widens header and cells')
+    const resizedSQLiteColumn = await js(`(() => { const th=Array.from(document.querySelectorAll('.table-wrap th')).find(item=>item.textContent.includes('a_very_long_field_name_for_auto_width_check')); const label=th.querySelector('.grid-header-label').getBoundingClientRect(), icon=th.querySelector('.sort-indicator').getBoundingClientRect(), name=th.querySelector('.grid-header-name').getBoundingClientRect(); const index=Array.from(th.parentElement.children).indexOf(th); const cell=document.querySelector('.table-wrap tbody tr')?.children[index]; return {width:Number(th.dataset.columnWidth),header:th.getBoundingClientRect().width,cell:cell?.getBoundingClientRect().width,iconRightInset:label.right-icon.right,textIconGap:icon.left-name.right,textOverflow:getComputedStyle(th.querySelector('.grid-header-name')).textOverflow} })()`)
+    assert.ok(resizedSQLiteColumn.width > narrowSQLiteHeader.width + 20)
+    assert.ok(resizedSQLiteColumn.cell > narrowSQLiteHeader.width + 20)
+    assert.ok(Math.abs(resizedSQLiteColumn.iconRightInset - 12) < 2)
+    assert.ok(resizedSQLiteColumn.textIconGap >= 0)
+    assert.equal(resizedSQLiteColumn.textOverflow, 'clip')
     await js('document.querySelector(".page-btn:not(:disabled):last-of-type")?.click()')
     await until(() => js('document.querySelector(".table-footer")?.textContent.includes("第 2 页")'), 'SQLite pagination reloads the requested page')
     assert.equal(await js('document.querySelector(".table-wrap tbody tr td:nth-child(2) input")?.value'), '101')
@@ -139,25 +155,34 @@ app.whenReady().then(async () => {
     await press(window, 'ENTER', ['meta'])
     await until(() => js('document.querySelectorAll(".result-table .column-resize-handle").length === 3'), 'SQL result fields render with resize handles')
     const sqlGridMetrics = await js(`(() => {
-      const headers = Array.from(document.querySelectorAll('.result-table th')); const long = headers.find(th => th.textContent.includes('very_long_sql_result_field_name_for_width')); const short = headers.find(th => th.textContent.includes('short')); const label = long.querySelector('.grid-header-label').getBoundingClientRect(), bounds = long.getBoundingClientRect(); const handle = long.querySelector('.column-resize-handle').getBoundingClientRect();
+      const headers = Array.from(document.querySelectorAll('.result-table th')); const long = headers.find(th => th.textContent.includes('very_long_sql_result_field_name_for_width')); const short = headers.find(th => th.textContent.includes('short')); const headerLabel = long.querySelector('.grid-header-label'), name = long.querySelector('.grid-header-name'), label = headerLabel.getBoundingClientRect(), nameBounds=name.getBoundingClientRect(), bounds = long.getBoundingClientRect(); const handle = long.querySelector('.column-resize-handle').getBoundingClientRect();
       const wrap = document.querySelector('.result-table'), table = wrap.querySelector('table'), wrapBounds = wrap.getBoundingClientRect(), tableBounds = table.getBoundingClientRect();
       const bodyCell = document.querySelector('.result-table tbody tr')?.children[Array.from(long.parentElement.children).indexOf(long)];
-      return { shortWidth: Number(short.dataset.columnWidth), longWidth: Number(long.dataset.columnWidth), headerAlignedLeft: getComputedStyle(long.querySelector('.grid-header-label')).justifyContent === 'flex-start' && Math.abs(long.querySelector('.grid-header-name').getBoundingClientRect().left - (long.querySelector('.grid-header-label').getBoundingClientRect().left + 8)) < 2, headerDivider: getComputedStyle(long).borderRightWidth === '1px' && getComputedStyle(long).borderRightStyle === 'solid', bodyDivider: getComputedStyle(bodyCell).borderRightWidth === '1px' && getComputedStyle(bodyCell).borderRightStyle === 'solid', borderGap: wrapBounds.right - tableBounds.right, wrapperWidth: wrapBounds.width, availableWidth: wrap.parentElement.clientWidth, handle: { x: handle.left + handle.width / 2, y: handle.top + handle.height / 2 } };
+      return { shortWidth: Number(short.dataset.columnWidth), longWidth: Number(long.dataset.columnWidth), headerAlignedLeft: getComputedStyle(headerLabel).justifyContent === 'flex-start' && Math.abs(nameBounds.left - (label.left + 8)) < 2, headerDivider: getComputedStyle(long).borderRightWidth === '1px' && getComputedStyle(long).borderRightStyle === 'solid', bodyDivider: getComputedStyle(bodyCell).borderRightWidth === '1px' && getComputedStyle(bodyCell).borderRightStyle === 'solid', longTextOverflow:name.scrollWidth>name.clientWidth,longTextClip:getComputedStyle(name).textOverflow==='clip',textRightInset:label.right-nameBounds.right,fullTitle:headerLabel.title==='very_long_sql_result_field_name_for_width',borderGap: wrapBounds.right - tableBounds.right, wrapperWidth: wrapBounds.width, availableWidth: wrap.parentElement.clientWidth, handle: { x: handle.left + handle.width / 2, y: handle.top + handle.height / 2 } };
     })()`)
     assert.ok(sqlGridMetrics.longWidth > sqlGridMetrics.shortWidth)
     assert.ok(sqlGridMetrics.shortWidth < 96)
     assert.equal(sqlGridMetrics.headerAlignedLeft, true)
     assert.equal(sqlGridMetrics.headerDivider, true)
     assert.equal(sqlGridMetrics.bodyDivider, true)
+    assert.equal(sqlGridMetrics.longTextClip, true)
+    assert.equal(sqlGridMetrics.fullTitle, true)
     assert.ok(sqlGridMetrics.borderGap <= 2)
     assert.ok(sqlGridMetrics.wrapperWidth < sqlGridMetrics.availableWidth)
-    await dragPointer(window, sqlGridMetrics.handle, { x: sqlGridMetrics.handle.x + 30, y: sqlGridMetrics.handle.y })
-    await until(async () => Number(await js('Array.from(document.querySelectorAll(".result-table th")).find(th => th.textContent.includes("very_long_sql_result_field_name_for_width")).dataset.columnWidth')) > sqlGridMetrics.longWidth + 20, 'SQL result column width changes by pointer drag')
+    await dragPointer(window, sqlGridMetrics.handle, { x: sqlGridMetrics.handle.x - 220, y: sqlGridMetrics.handle.y })
+    await until(async () => Number(await js('Array.from(document.querySelectorAll(".result-table th")).find(th => th.textContent.includes("very_long_sql_result_field_name_for_width")).dataset.columnWidth')) < sqlGridMetrics.longWidth - 100, 'SQL result column narrows by pointer drag')
+    const narrowSQLResultHeader = await js(`(() => { const th=Array.from(document.querySelectorAll('.result-table th')).find(item=>item.textContent.includes('very_long_sql_result_field_name_for_width')), label=th.querySelector('.grid-header-label'), name=th.querySelector('.grid-header-name'); return {textOverflow:getComputedStyle(name).textOverflow,hasClippedText:name.scrollWidth>name.clientWidth,textRightInset:label.getBoundingClientRect().right-name.getBoundingClientRect().right,fullTitle:label.title==='very_long_sql_result_field_name_for_width',width:Number(th.dataset.columnWidth),handle:(()=>{const r=th.querySelector('.column-resize-handle').getBoundingClientRect();return{x:r.left+r.width/2,y:r.top+r.height/2}})()} })()`)
+    assert.equal(narrowSQLResultHeader.textOverflow, 'clip')
+    assert.equal(narrowSQLResultHeader.hasClippedText, true)
+    assert.ok(Math.abs(narrowSQLResultHeader.textRightInset - 8) < 2)
+    assert.equal(narrowSQLResultHeader.fullTitle, true)
+    await dragPointer(window, narrowSQLResultHeader.handle, { x: narrowSQLResultHeader.handle.x + 30, y: narrowSQLResultHeader.handle.y })
+    await until(async () => Number(await js('Array.from(document.querySelectorAll(".result-table th")).find(th => th.textContent.includes("very_long_sql_result_field_name_for_width")).dataset.columnWidth')) > narrowSQLResultHeader.width + 20, 'SQL result column widens by pointer drag')
     const sqlWidthAfterDrag = await js('Number(Array.from(document.querySelectorAll(".result-table th")).find(th => th.textContent.includes("very_long_sql_result_field_name_for_width")).dataset.columnWidth)')
     await js('Array.from(document.querySelectorAll(".tab")).find(tab => tab.textContent.includes("grid_sort_test")).click()')
     await until(() => js('document.querySelector(".content-area .panel h1")?.textContent === "grid_sort_test"'), 'return to resized SQLite table tab')
     const tableWidthAfterPaging = await js('Number(Array.from(document.querySelectorAll(".table-wrap th")).find(th => th.textContent.includes("a_very_long_field_name_for_auto_width_check")).dataset.columnWidth)')
-    assert.ok(tableWidthAfterPaging > tableGridMetrics.widthBefore + 20)
+    assert.ok(tableWidthAfterPaging > narrowSQLiteHeader.width + 20)
     await js('Array.from(document.querySelectorAll(".tab")).find(tab => tab.textContent.includes("SELECT 1 AS short")).click()')
     await until(() => js('!!document.querySelector(".result-table")'), 'return to resized SQL result tab')
     assert.ok(await js('Number(Array.from(document.querySelectorAll(".result-table th")).find(th => th.textContent.includes("very_long_sql_result_field_name_for_width")).dataset.columnWidth)') > sqlWidthAfterDrag - 2)
@@ -230,7 +255,7 @@ app.whenReady().then(async () => {
     console.log('PASS: tab context menu left/right/others, inactive target, Escape dismissal')
     await newSqlTabs(20)
     await until(async () => { const metrics = await activeTabMetrics(); return metrics?.scrollWidth > metrics?.clientWidth && metrics.visible }, 'new active SQL tab scrolls into view')
-    await js('document.querySelector(".tabbar").scrollLeft = 0')
+    await js('document.activeElement?.blur(); document.querySelector(".tabbar").scrollLeft = 0')
     await delay(100)
     assert.equal((await activeTabMetrics()).scrollLeft, 0)
     await js('document.querySelector(".tab.active").click()')
@@ -241,7 +266,7 @@ app.whenReady().then(async () => {
     await js(`Array.from(document.querySelectorAll('.table-object-button')).find(button => button.textContent.includes(${JSON.stringify(sidebarTarget)})).click()`)
     await until(() => js('document.querySelector(".content-area .panel h1")?.textContent === ' + JSON.stringify(sidebarTarget)), 'opening a sidebar table activates its tab')
     await until(async () => (await activeTabMetrics())?.visible, 'sidebar table tab scrolls into view')
-    await js('document.querySelector(".tabbar").scrollLeft = 0')
+    await js('document.activeElement?.blur(); document.querySelector(".tabbar").scrollLeft = 0')
     await delay(100)
     assert.equal((await activeTabMetrics()).scrollLeft, 0)
     await js(`Array.from(document.querySelectorAll('.table-object-button')).find(button => button.textContent.includes(${JSON.stringify(sidebarTarget)})).click()`)
