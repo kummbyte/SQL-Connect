@@ -13,6 +13,7 @@ import './styles.css'
 
 type Tab = { id: string; kind: 'table' | 'structure' | 'query'; title: string; table?: string; sql?: string; connectionId: string; database?: string }
 type TableContext = { tabId: string; connectionId: string; table: string; database?: string }
+type TableViewState = { page: number; filter: string; sort: { column?: string; direction?: 'asc' | 'desc' } }
 type Toast = { type: 'success' | 'error' | 'info'; text: string }
 type ContextMenu = { x: number; y: number; tabId: string }
 
@@ -32,6 +33,45 @@ function revealActiveTab(tabbar: HTMLDivElement | null) {
   else if (activeRect.right > visibleRight) scrollBy = activeRect.right - visibleRight
   if (!scrollBy) return
   tabbar.scrollLeft = Math.max(0, Math.min(tabbar.scrollWidth - tabbar.clientWidth, tabbar.scrollLeft + scrollBy))
+}
+const DEFAULT_TABLE_VIEW: TableViewState = { page: 0, filter: '', sort: {} }
+const columnWidthKey = (tabId: string, column: string) => `${tabId}\u0000${column}`
+function measureColumnWidth(column: string, sortable: boolean) {
+  const canvas = document.createElement('canvas')
+  const context = canvas.getContext('2d')
+  if (!context) return Math.max(96, Math.min(360, column.length * 12 + 56))
+  context.font = '600 12px Inter, -apple-system, BlinkMacSystemFont, "SF Pro Display", "PingFang SC", sans-serif'
+  return Math.max(96, Math.min(360, Math.ceil(context.measureText(column).width) + 42 + (sortable ? 18 : 0)))
+}
+function ColumnResizeHandle({ column, width, onResize }: { column: string; width: number; onResize: (width: number) => void }) {
+  const drag = useRef<{ pointerId: number; startX: number; startWidth: number } | null>(null)
+  const cleanup = useRef<(() => void) | null>(null)
+  useEffect(() => () => cleanup.current?.(), [])
+  return <span className="column-resize-handle" role="separator" aria-orientation="vertical" aria-label={`调整列宽 ${column}`} aria-valuenow={width} tabIndex={0}
+    onPointerDown={event => {
+      event.preventDefault(); event.stopPropagation()
+      drag.current = { pointerId: event.pointerId, startX: event.clientX, startWidth: width }
+      cleanup.current?.()
+      const move = (pointerEvent: PointerEvent) => { const current = drag.current; if (current?.pointerId === pointerEvent.pointerId) onResize(Math.max(72, Math.min(800, current.startWidth + pointerEvent.clientX - current.startX))) }
+      const end = (pointerEvent: PointerEvent) => { if (drag.current?.pointerId === pointerEvent.pointerId) { drag.current = null; cleanup.current?.() } }
+      const cancel = () => { drag.current = null; cleanup.current?.() }
+      window.addEventListener('pointermove', move)
+      window.addEventListener('pointerup', end)
+      window.addEventListener('pointercancel', cancel)
+      cleanup.current = () => { window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', end); window.removeEventListener('pointercancel', cancel) }
+    }}
+    onKeyDown={event => { if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') { event.preventDefault(); onResize(Math.max(72, Math.min(800, width + (event.key === 'ArrowRight' ? 12 : -12)))) } }} />
+}
+function GridHeader({ tabId, columns, widths, setWidth, sort, onSort, leadingLabel, leadingWidth, trailingWidth }: { tabId: string; columns: string[]; widths: Record<string, number>; setWidth: (column: string, width: number) => void; sort?: { column?: string; direction?: 'asc' | 'desc' }; onSort?: (column: string) => void; leadingLabel?: string; leadingWidth?: number; trailingWidth?: number }) {
+  return <thead><tr>{leadingLabel !== undefined && <th className="row-number" style={{ width: leadingWidth, minWidth: leadingWidth, maxWidth: leadingWidth }}>{leadingLabel}</th>}{columns.map(column => {
+    const key = columnWidthKey(tabId, column)
+    const width = widths[key] ?? measureColumnWidth(column, !!onSort)
+    const activeDirection = sort?.column === column ? sort.direction : undefined
+    return <th key={column} data-column-width={width} style={{ width, minWidth: width, maxWidth: width }} aria-sort={activeDirection ? (activeDirection === 'asc' ? 'ascending' : 'descending') : 'none'}>
+      {onSort ? <button className="grid-header-label" type="button" title={column} onClick={() => onSort(column)}><span className="grid-header-name">{column}</span><span className="sort-indicator">{activeDirection === 'asc' ? '↑' : activeDirection === 'desc' ? '↓' : '↕'}</span></button> : <span className="grid-header-label" title={column}><span className="grid-header-name">{column}</span></span>}
+      <ColumnResizeHandle column={column} width={width} onResize={next => setWidth(column, next)} />
+    </th>
+  })}{trailingWidth !== undefined && <th style={{ width: trailingWidth, minWidth: trailingWidth, maxWidth: trailingWidth }} />}</tr></thead>
 }
 const errorText = (error: unknown) => {
   const message = error instanceof Error ? error.message : String(error)
@@ -63,14 +103,14 @@ function App() {
   const [sqlText, setSqlText] = useState('SELECT name, type FROM sqlite_master WHERE type IN (\'table\', \'view\') ORDER BY type, name;')
   const [sqlByTab, setSqlByTab] = useState<Record<string, string>>({})
   const [results, setResults] = useState<Record<string, QueryResult>>({})
+  const [tableViews, setTableViews] = useState<Record<string, TableViewState>>({})
+  const [columnWidths, setColumnWidths] = useState<Record<string, number>>({})
+  const tableRequestIds = useRef(new Map<string, number>())
   const [structures, setStructures] = useState<Record<string, Structure>>({})
   const [pending, setPending] = useState<Record<string, PendingChange[]>>({})
   const [loading, setLoading] = useState(false)
   const [theme, setTheme] = useState<'dark' | 'light'>('dark')
   const [toast, setToast] = useState<Toast | null>(null)
-  const [filter, setFilter] = useState('')
-  const [page, setPage] = useState(0)
-  const [sort, setSort] = useState<{ column?: string; direction?: 'asc' | 'desc' }>({})
   const [contextMenu, setContextMenu] = useState<ContextMenu | null>(null)
   const sqlExecutingRef = useRef(false)
   const [connectionMenuOpen, setConnectionMenuOpen] = useState(false)
@@ -237,7 +277,14 @@ function App() {
     setStructures(current => { const next = { ...current }; targetTabs.forEach(tab => delete next[tab.id]); return next })
     setPending(current => { const next = { ...current }; targetTabs.forEach(tab => delete next[tab.id]); return next })
     setSqlByTab(current => { const next = { ...current }; targetTabs.forEach(tab => delete next[tab.id]); return next })
+    clearTabViewState(targetTabs.map(tab => tab.id))
     if (nextActive) { const nextTab = remaining.find(tab => tab.id === nextActive); if (nextTab?.kind === 'query') setSqlText(sqlByTab[nextActive] ?? nextTab.sql ?? '') }
+  }
+  function clearTabViewState(tabIds: string[]) {
+    const ids = new Set(tabIds)
+    ids.forEach(id => tableRequestIds.current.delete(id))
+    setTableViews(current => { const next = { ...current }; ids.forEach(id => delete next[id]); return next })
+    setColumnWidths(current => Object.fromEntries(Object.entries(current).filter(([key]) => ![...ids].some(id => key.startsWith(`${id}\u0000`)))))
   }
   async function disconnect(id: string): Promise<boolean> {
     if (disconnectingRef.current.has(id)) return false
@@ -302,11 +349,54 @@ function App() {
     if (saved && wasConnected && item.type !== 'mysql' && !disconnectingRef.current.has(item.id)) await connect(next)
   }
   async function openTable(connectionId: string, item: TableInfo, kind: Tab['kind'] = 'table', database?: string) {
-    const id = `${connectionId}:${database || ''}:${kind}:${item.name}`; const nextTab: Tab = { id, kind, title: item.name, table: item.name, connectionId, database }; setTabs(v => { const next = v.some(t => t.id === id) ? v : [...v, nextTab]; tabsRef.current = next; return next }); setActiveTab(id); setTabRevealRequest(v => v + 1); setPage(0); setFilter(''); setSort({})
+    const id = `${connectionId}:${database || ''}:${kind}:${item.name}`; const nextTab: Tab = { id, kind, title: item.name, table: item.name, connectionId, database }; const existed = tabsRef.current.some(t => t.id === id); setTabs(v => { const next = existed ? v : [...v, nextTab]; tabsRef.current = next; return next }); setActiveTab(id); setTabRevealRequest(v => v + 1)
     if (kind === 'structure') { if (!structures[id]) setStructures(v => ({ ...v, [id]: undefined as never })); try { const structure = await window.sqlConnect.db.structure(connectionId, item.name, database); if (tabsRef.current.some(t => t.id === id)) setStructures(v => ({ ...v, [id]: structure })) } catch (error) { notify(error instanceof Error ? error.message : String(error), 'error') } }
-    else await refreshTable({ tabId: id, connectionId, table: item.name, database }, { offset: 0, filter: '', orderBy: undefined, direction: undefined })
+    else { const view = tableViews[id] ?? DEFAULT_TABLE_VIEW; if (!existed) setTableViews(v => ({ ...v, [id]: DEFAULT_TABLE_VIEW })); await refreshTable({ tabId: id, connectionId, table: item.name, database }, { offset: view.page * 100, filter: view.filter, orderBy: view.sort.column, direction: view.sort.direction }) }
   }
-  async function refreshTable(context: TableContext, options: { offset?: number; filter?: string; orderBy?: string; direction?: 'asc' | 'desc' } = {}) { setLoading(true); try { const data = await window.sqlConnect.db.query(context.connectionId, context.table, { offset: options.offset ?? page * 100, limit: 100, orderBy: 'orderBy' in options ? options.orderBy : sort.column, direction: 'direction' in options ? options.direction : sort.direction, filter: options.filter ?? filter, database: context.database }); if (tabsRef.current.some(t => t.id === context.tabId)) setResults(v => ({ ...v, [context.tabId]: data })) } catch (error) { notify(error instanceof Error ? error.message : String(error), 'error') } finally { setLoading(false) } }
+  async function refreshTable(context: TableContext, options: { offset?: number; filter?: string; orderBy?: string; direction?: 'asc' | 'desc'; view?: TableViewState } = {}) {
+    const requestId = (tableRequestIds.current.get(context.tabId) || 0) + 1
+    tableRequestIds.current.set(context.tabId, requestId)
+    setLoading(true)
+    try {
+      const view = options.view ?? tableViews[context.tabId] ?? DEFAULT_TABLE_VIEW
+      const data = await window.sqlConnect.db.query(context.connectionId, context.table, { offset: options.offset ?? view.page * 100, limit: 100, orderBy: 'orderBy' in options ? options.orderBy : view.sort.column, direction: 'direction' in options ? options.direction : view.sort.direction, filter: 'filter' in options ? options.filter : view.filter, database: context.database })
+      if (tableRequestIds.current.get(context.tabId) !== requestId || !tabsRef.current.some(t => t.id === context.tabId)) return false
+      setResults(v => ({ ...v, [context.tabId]: data }))
+      if (options.view) setTableViews(v => ({ ...v, [context.tabId]: options.view! }))
+      return true
+    } catch (error) { if (tableRequestIds.current.get(context.tabId) === requestId) notify(errorText(error), 'error'); return false }
+    finally { if (tableRequestIds.current.get(context.tabId) === requestId) setLoading(false) }
+  }
+  function tableContext(tabId: string): TableContext | undefined { const tab = tabsRef.current.find(item => item.id === tabId); return tab?.table ? { tabId, connectionId: tab.connectionId, table: tab.table, database: tab.database } : undefined }
+  function canReloadTable(tabId: string) {
+    const changes = pending[tabId] || []
+    if (!changes.length) return true
+    if (!window.confirm(`当前表有 ${changes.length} 项未提交修改，重新读取后将放弃这些修改。\n\n确定放弃并继续吗？`)) return false
+    setPending(v => ({ ...v, [tabId]: [] }))
+    return true
+  }
+  async function sortTable(tabId: string, column: string) {
+    if (!canReloadTable(tabId)) return
+    const current = tableViews[tabId] ?? DEFAULT_TABLE_VIEW
+    const direction: 'asc' | 'desc' = current.sort.column === column && current.sort.direction === 'asc' ? 'desc' : 'asc'
+    const view = { ...current, page: 0, sort: { column, direction } }
+    const context = tableContext(tabId)
+    if (context) await refreshTable(context, { offset: 0, filter: current.filter, orderBy: column, direction, view })
+  }
+  async function setTablePage(tabId: string, pageNumber: number) {
+    if (!canReloadTable(tabId)) return
+    const current = tableViews[tabId] ?? DEFAULT_TABLE_VIEW
+    const view = { ...current, page: Math.max(0, pageNumber) }
+    const context = tableContext(tabId)
+    if (context) await refreshTable(context, { offset: view.page * 100, view })
+  }
+  async function searchTable(tabId: string, filterValue: string) {
+    if (!canReloadTable(tabId)) return
+    const current = tableViews[tabId] ?? DEFAULT_TABLE_VIEW
+    const view = { ...current, page: 0, filter: filterValue }
+    const context = tableContext(tabId)
+    if (context) await refreshTable(context, { offset: 0, filter: filterValue, view })
+  }
   async function runSql(sqlOverride?: string) { const text = (sqlOverride ?? sqlText).trim(); if (!text || !activeConnection || loading || sqlExecutingRef.current) return; sqlExecutingRef.current = true; const id = `${activeConnection}:${activeDatabase || ''}:query:${uid()}`; const title = text.split(/\s+/).slice(0, 4).join(' '); const queryTab: Tab = { id, kind: 'query', title, sql: text, connectionId: activeConnection, database: activeDatabase || undefined }; setTabs(v => { const next = [...v, queryTab]; tabsRef.current = next; return next }); setSqlByTab(v => ({ ...v, [id]: text })); setActiveTab(id); setLoading(true); try { const data = await window.sqlConnect.db.execute(activeConnection, text, id, activeDatabase || undefined); if (tabsRef.current.some(t => t.id === id)) setResults(v => ({ ...v, [id]: data })); notify(data.changes !== undefined ? `执行成功，影响 ${data.changes} 行` : `查询完成，用时 ${data.elapsedMs} ms`, 'success') } catch (error) { notify(error instanceof Error ? error.message : String(error), 'error') } finally { sqlExecutingRef.current = false; setLoading(false) } }
   function updateCell(tabId: string, row: Record<string, unknown>, column: string, value: string) { const tab = tabs.find(t => t.id === tabId); if (!tab?.table) return; const key = String(row.__sqlconnect_rowid ?? JSON.stringify(row)); setResults(v => ({ ...v, [tabId]: { ...v[tabId], rows: v[tabId].rows.map(r => String(r.__sqlconnect_rowid ?? JSON.stringify(r)) === key ? { ...r, [column]: value } : r) } })); setPending(v => ({ ...v, [tabId]: [...(v[tabId] || []).filter(c => !(c.type === 'update' && String(c.rowid) === String(row.__sqlconnect_rowid))), { type: 'update', table: tab.table!, rowid: row.__sqlconnect_rowid as string | number, values: { [column]: value }, original: { [column]: row[column] } }] })) }
   function addRow(tabId: string) { const tab = tabs.find(t => t.id === tabId); const result = results[tabId]; if (!tab?.table || !result) return; const row = Object.fromEntries(result.columns.filter(c => c !== '__sqlconnect_rowid').map(c => [c, null])); setResults(v => ({ ...v, [tabId]: { ...v[tabId], rows: [...v[tabId].rows, row] } })); setPending(v => ({ ...v, [tabId]: [...(v[tabId] || []), { type: 'insert', table: tab.table!, values: row }] })) }
@@ -332,10 +422,12 @@ function App() {
     setStructures(current => { const next = { ...current }; closeIds.forEach(id => delete next[id]); return next })
     setPending(current => { const next = { ...current }; closeIds.forEach(id => delete next[id]); return next })
     setSqlByTab(current => { const next = { ...current }; closeIds.forEach(id => delete next[id]); return next })
+    clearTabViewState([...closeIds])
     if (nextActive) { const nextTab = remaining.find(tab => tab.id === nextActive); if (nextTab?.kind === 'query') setSqlText(sqlByTab[nextActive] ?? nextTab.sql ?? '') }
     setContextMenu(null)
   }
   function closeTab(id: string) { closeTabs([id], id) }
+  function setColumnWidth(tabId: string, column: string, width: number) { setColumnWidths(v => ({ ...v, [columnWidthKey(tabId, column)]: width })) }
   function openTabContextMenu(event: React.MouseEvent, tabId: string) {
     event.preventDefault()
     const width = 190; const height = 136
@@ -412,7 +504,7 @@ function App() {
       </aside>
       <main className="workspace">
         <div className="tabbar" ref={tabbarRef}>{tabs.length === 0 && <div className="tabbar-placeholder">选择一个表，或打开 SQL 查询</div>}{tabs.map(tab => <button className={`tab ${tab.id === activeTab ? 'active' : ''}`} key={tab.id} onClick={() => { setActiveTab(tab.id); setTabRevealRequest(v => v + 1); if (tab.kind === 'query') setSqlText(sqlByTab[tab.id] ?? tab.sql ?? '') }} onContextMenu={event => openTabContextMenu(event, tab.id)}><span className="tab-dot">{tab.kind === 'query' ? <Zap size={12}/> : tab.kind === 'structure' ? <Settings2 size={12}/> : <Table2 size={12}/>}</span><span>{tab.title}</span><X size={13} onClick={(event) => { event.stopPropagation(); closeTab(tab.id) }}/></button>)}<button className="new-query" onClick={newQuery}><Plus size={15}/>SQL</button></div>
-        <div className="content-area">{active?.kind === 'structure' && <StructureView structure={structures[active.id]} />}{active?.kind === 'table' && result && <DataView tab={active} result={result} readonly={connections.find(c => c.id === activeConnection)?.readonly || connections.find(c => c.id === activeConnection)?.type === 'mysql'} filter={filter} setFilter={setFilter} page={page} setPage={setPage} sort={sort} setSort={setSort} onRefresh={() => active.table && void refreshTable({ tabId: active.id, connectionId: active.connectionId, table: active.table, database: active.database })} onEdit={updateCell} onAdd={() => addRow(active.id)} onDelete={deleteRow} changes={activeChanges} onCommit={() => void commit(active.id)} onDiscard={() => discard(active.id)} />}{active?.kind === 'query' && <QueryView sql={sqlText} setSql={handleSqlChange} onRun={runSql} loading={loading} result={result} database={activeDatabase} databases={mysqlDatabases[activeConnection] || []} dialect={connections.find(c => c.id === activeConnection)?.type === 'mysql' ? 'mysql' : 'sqlite'} setDatabase={database => { setSelectedDatabase(v => ({ ...v, [activeConnection]: database })); setTabs(v => v.map(t => t.id === active.id ? { ...t, database } : t)) }} />}</div>
+        <div className="content-area">{active?.kind === 'structure' && <StructureView structure={structures[active.id]} />}{active?.kind === 'table' && result && <DataView tab={active} result={result} readonly={connections.find(c => c.id === activeConnection)?.readonly || connections.find(c => c.id === activeConnection)?.type === 'mysql'} view={tableViews[active.id] ?? DEFAULT_TABLE_VIEW} setFilter={(value: string) => setTableViews(v => ({ ...v, [active.id]: { ...(v[active.id] ?? DEFAULT_TABLE_VIEW), filter: value } }))} onSearch={(value: string) => void searchTable(active.id, value)} onPage={(value: number) => void setTablePage(active.id, value)} sortTable={(column: string) => void sortTable(active.id, column)} widths={columnWidths} setColumnWidth={setColumnWidth} onRefresh={() => { if (canReloadTable(active.id)) void refreshTable({ tabId: active.id, connectionId: active.connectionId, table: active.table!, database: active.database }) }} onEdit={updateCell} onAdd={() => addRow(active.id)} onDelete={deleteRow} changes={activeChanges} onCommit={() => void commit(active.id)} onDiscard={() => discard(active.id)} />}{active?.kind === 'query' && <QueryView tabId={active.id} widths={columnWidths} setColumnWidth={setColumnWidth} sql={sqlText} setSql={handleSqlChange} onRun={runSql} loading={loading} result={result} database={activeDatabase} databases={mysqlDatabases[activeConnection] || []} dialect={connections.find(c => c.id === activeConnection)?.type === 'mysql' ? 'mysql' : 'sqlite'} setDatabase={database => { setSelectedDatabase(v => ({ ...v, [activeConnection]: database })); setTabs(v => v.map(t => t.id === active.id ? { ...t, database } : t)) }} />}</div>
         <footer className="statusbar"><span><span className={`status-dot ${loading ? 'busy' : ''}`}></span>{loading ? '正在执行…' : activeConnection ? '已就绪' : '未连接数据库'}</span>{activeConnection && <span className="status-path">{connections.find(c => c.id === activeConnection)?.type === 'mysql' ? `${(connections.find(c => c.id === activeConnection) as MySQLConnection).host}:${(connections.find(c => c.id === activeConnection) as MySQLConnection).port}` : (connections.find(c => c.id === activeConnection) as any)?.path}</span>}<span className="status-spacer"/><span>UTF-8</span><span>SQL Connect 1.0</span></footer>
       </main>
     </div>
@@ -438,13 +530,18 @@ function ConnectionDetails({ connection }: { connection: Connection }) {
   return <dl className="connection-details" aria-label="连接信息">{details.map(([label, value]) => <div className="connection-detail" key={label}><dt>{label}</dt><dd title={value}>{value}</dd></div>)}</dl>
 }
 
-function DataView({ tab, result, readonly, filter, setFilter, page, setPage, sort, setSort, onRefresh, onEdit, onAdd, onDelete, changes, onCommit, onDiscard }: any) { const columns = result.columns.filter((c: string) => c !== '__sqlconnect_rowid'); return <div className="panel"><div className="panel-head"><div><div className="eyebrow">DATA TABLE</div><h1>{tab.table}</h1></div><div className="panel-actions"><div className="search-box"><Search size={15}/><input value={filter} onChange={e => setFilter(e.target.value)} onKeyDown={e => e.key === 'Enter' && onRefresh()} placeholder="筛选当前表…"/></div><button className="toolbar-btn" onClick={onRefresh}><RefreshCw size={15}/>刷新</button>{changes.length > 0 && !readonly && <><button className="toolbar-btn danger" onClick={onDiscard}><X size={15}/>放弃</button><button className="toolbar-btn primary" onClick={onCommit}><Save size={15}/>提交 {changes.length}</button></>}</div></div><div className="table-wrap"><table><thead><tr><th className="row-number">#</th>{columns.map((column: string) => <th key={column} onClick={() => setSort({ column, direction: sort.column === column && sort.direction === 'asc' ? 'desc' : 'asc' })}>{column}<span className="sort-indicator">{sort.column === column ? sort.direction === 'asc' ? '↑' : '↓' : '↕'}</span></th>)}<th></th></tr></thead><tbody>{result.rows.map((row: Record<string, unknown>, index: number) => <tr key={String(row.__sqlconnect_rowid ?? index)}><td className="row-number">{page * 100 + index + 1}</td>{columns.map((column: string) => <td key={column}><input disabled={readonly} className={changes.some((c: PendingChange) => c.type === 'update' && c.rowid === row.__sqlconnect_rowid && c.values[column] !== undefined) ? 'dirty-cell' : ''} value={row[column] === null ? '' : String(row[column] ?? '')} placeholder={row[column] === null ? 'NULL' : ''} onChange={e => onEdit(tab.id, row, column, e.target.value)}/></td>)}<td>{!readonly && <button className="row-delete" onClick={() => onDelete(tab.id, row)}><Trash2 size={14}/></button>}</td></tr>)}{!result.rows.length && <tr><td colSpan={columns.length + 2} className="no-rows">没有数据</td></tr>}</tbody></table></div><div className="table-footer"><span>{result.total ?? result.rows.length} 行{result.truncated ? ' · 已显示前 1000 行' : ''}</span><span className="footer-spacer"/>{!readonly && <button className="add-row" onClick={onAdd}><Plus size={14}/>新增行</button>}<button className="page-btn" disabled={page === 0} onClick={() => setPage(page - 1)}>上一页</button><span>第 {page + 1} 页</span><button className="page-btn" disabled={result.rows.length < 100} onClick={() => setPage(page + 1)}>下一页</button></div></div> }
+function DataView({ tab, result, readonly, view, setFilter, onSearch, onPage, sortTable, widths, setColumnWidth, onRefresh, onEdit, onAdd, onDelete, changes, onCommit, onDiscard }: any) {
+  const columns = result.columns.filter((column: string) => column !== '__sqlconnect_rowid')
+  return <div className="panel"><div className="panel-head"><div><div className="eyebrow">DATA TABLE</div><h1>{tab.table}</h1></div><div className="panel-actions"><div className="search-box"><Search size={15}/><input value={view.filter} onChange={event => setFilter(event.target.value)} onKeyDown={event => event.key === 'Enter' && onSearch(event.currentTarget.value)} placeholder="筛选当前表…"/><button className="search-submit" aria-label="应用筛选" title="应用筛选" onClick={() => onSearch(view.filter)}><Search size={13}/></button></div><button className="toolbar-btn" onClick={onRefresh}><RefreshCw size={15}/>刷新</button>{changes.length > 0 && !readonly && <><button className="toolbar-btn danger" onClick={onDiscard}><X size={15}/>放弃</button><button className="toolbar-btn primary" onClick={onCommit}><Save size={15}/>提交 {changes.length}</button></>}</div></div><div className="table-wrap"><table className="resizable-grid" style={{ minWidth: `${48 + columns.reduce((sum: number, column: string) => sum + (widths[columnWidthKey(tab.id, column)] ?? measureColumnWidth(column, true)), 0) + (readonly ? 0 : 40)}px` }}><colgroup><col style={{ width: 48 }}/>{columns.map((column: string) => <col key={column} style={{ width: widths[columnWidthKey(tab.id, column)] ?? measureColumnWidth(column, true) }} />)}{!readonly && <col style={{ width: 40 }}/>}</colgroup><GridHeader tabId={tab.id} columns={columns} widths={widths} setWidth={setColumnWidthForView(setColumnWidth, tab.id)} sort={view.sort} onSort={(column: string) => sortTable(column)} leadingLabel="#" leadingWidth={48} trailingWidth={readonly ? undefined : 40}/><tbody>{result.rows.map((row: Record<string, unknown>, index: number) => <tr key={String(row.__sqlconnect_rowid ?? index)}><td className="row-number">{view.page * 100 + index + 1}</td>{columns.map((column: string) => <td key={column}><input title={String(row[column] ?? (row[column] === null ? 'NULL' : ''))} disabled={readonly} className={changes.some((change: PendingChange) => change.type === 'update' && change.rowid === row.__sqlconnect_rowid && change.values[column] !== undefined) ? 'dirty-cell' : ''} value={row[column] === null ? '' : String(row[column] ?? '')} placeholder={row[column] === null ? 'NULL' : ''} onChange={event => onEdit(tab.id, row, column, event.target.value)}/></td>)}{!readonly && <td><button className="row-delete" aria-label={`删除第 ${view.page * 100 + index + 1} 行`} onClick={() => onDelete(tab.id, row)}><Trash2 size={14}/></button></td>}</tr>)}{!result.rows.length && <tr><td colSpan={columns.length + (readonly ? 1 : 2)} className="no-rows">没有数据</td></tr>}</tbody></table></div><div className="table-footer"><span>{result.total ?? result.rows.length} 行{result.truncated ? ' · 已显示前 1000 行' : ''}</span><span className="footer-spacer"/>{!readonly && <button className="add-row" onClick={onAdd}><Plus size={14}/>新增行</button>}<button className="page-btn" disabled={view.page === 0} onClick={() => onPage(view.page - 1)}>上一页</button><span>第 {view.page + 1} 页</span><button className="page-btn" disabled={result.rows.length < 100} onClick={() => onPage(view.page + 1)}>下一页</button></div></div>
+}
+function setColumnWidthForView(setColumnWidth: (tabId: string, column: string, width: number) => void, tabId: string) { return (column: string, width: number) => setColumnWidth(tabId, column, width) }
 
 function StructureView({ structure }: { structure?: Structure }) { if (!structure) return <div className="loading-state"><Activity className="spin"/>正在读取结构…</div>; return <div className="panel structure-panel"><div className="panel-head"><div><div className="eyebrow">SCHEMA</div><h1>表结构</h1></div><span className={`badge ${structure.editable ? 'green' : 'gray'}`}>{structure.editable ? '可编辑' : '只读'}</span></div><h3>字段</h3><div className="structure-table"><table><thead><tr><th>名称</th><th>类型</th><th>非空</th><th>默认值</th><th>主键</th></tr></thead><tbody>{structure.columns.map(c => <tr key={c.name}><td className="mono">{c.name}</td><td>{c.type || '—'}</td><td>{c.notnull ? '是' : '否'}</td><td className="mono">{c.dflt_value || '—'}</td><td>{c.pk ? <span className="key-pill">PK {c.pk}</span> : '—'}</td></tr>)}</tbody></table></div><h3>建表 SQL</h3><pre className="sql-preview">{structure.sql || '没有可用的建表 SQL'}</pre>{structure.indexes.length > 0 && <><h3>索引</h3><div className="index-list">{structure.indexes.map((i: any) => <span key={i.name} className="index-pill">{i.name}</span>)}</div></>}</div> }
 
-function QueryView({ sql, setSql, onRun, loading, result, database, databases, dialect, setDatabase }: { sql: string; setSql: (value: string) => void; onRun: (sql?: string) => void; loading: boolean; result?: QueryResult; database?: string; databases: string[]; dialect: 'sqlite' | 'mysql'; setDatabase: (database: string) => void }) {
+function QueryView({ tabId, widths, setColumnWidth, sql, setSql, onRun, loading, result, database, databases, dialect, setDatabase }: { tabId: string; widths: Record<string, number>; setColumnWidth: (tabId: string, column: string, width: number) => void; sql: string; setSql: (value: string) => void; onRun: (sql?: string) => void; loading: boolean; result?: QueryResult; database?: string; databases: string[]; dialect: 'sqlite' | 'mysql'; setDatabase: (database: string) => void }) {
   const extensions = useMemo(() => [sqlLanguage({ dialect: dialect === 'mysql' ? MySQL : SQLite, upperCaseKeywords: true }), autocompletion({ interactionDelay: 0 }), Prec.highest(keymap.of([{ key: 'Tab', run: (view: EditorView) => acceptCompletion(view) || indentWithTab.run?.(view) || false }, { key: 'Mod-Enter', run: (view: EditorView) => { onRun(view.state.doc.toString()); return true } }]))], [dialect, onRun])
-  return <div className="query-panel"><div className="query-head"><div><div className="eyebrow">SQL EDITOR</div><h1>查询工作区</h1>{databases.length > 0 && <label className="database-picker">数据库 <select value={database || ''} onChange={event => setDatabase(event.target.value)}><option value="">选择数据库</option>{databases.map(name => <option key={name} value={name}>{name}</option>)}</select></label>}</div><button className="run-btn" onClick={() => onRun(sql)} disabled={loading}><Play size={15} fill="currentColor"/>{loading ? '执行中…' : '执行'} <kbd>⌘ Enter</kbd></button></div><div className="editor-wrap"><CodeMirror value={sql} height="220px" theme={oneDark} extensions={extensions} onChange={setSql} indentWithTab={false} basicSetup={{ lineNumbers: true, foldGutter: true, autocompletion: false }}/></div><div className="result-head"><div><span className="eyebrow">RESULT</span>{result && <span className="result-meta">{result.changes !== undefined ? `${result.changes} 行受影响 · ${result.elapsedMs} ms` : `${result.rows.length} 行 · ${result.elapsedMs} ms${result.truncated ? ' · 已截断' : ''}`}</span>}</div>{loading && <button className="stop-btn"><Square size={13} fill="currentColor"/>停止</button>}</div>{result && <div className="result-table"><table><thead><tr>{result.columns.map(c => <th key={c}>{c}</th>)}</tr></thead><tbody>{result.rows.map((row, i) => <tr key={i}>{result.columns.map(c => <td key={c} className={row[c] === null ? 'null-value' : ''}>{formatValue(row[c])}</td>)}</tr>)}</tbody></table>{!result.rows.length && result.changes === undefined && <div className="no-rows">查询没有返回数据</div>}</div>}</div>
+  const columns = result?.columns || []
+  return <div className="query-panel"><div className="query-head"><div><div className="eyebrow">SQL EDITOR</div><h1>查询工作区</h1>{databases.length > 0 && <label className="database-picker">数据库 <select value={database || ''} onChange={event => setDatabase(event.target.value)}><option value="">选择数据库</option>{databases.map(name => <option key={name} value={name}>{name}</option>)}</select></label>}</div><button className="run-btn" onClick={() => onRun(sql)} disabled={loading}><Play size={15} fill="currentColor"/>{loading ? '执行中…' : '执行'} <kbd>⌘ Enter</kbd></button></div><div className="editor-wrap"><CodeMirror value={sql} height="220px" theme={oneDark} extensions={extensions} onChange={setSql} indentWithTab={false} basicSetup={{ lineNumbers: true, foldGutter: true, autocompletion: false }}/></div><div className="result-head"><div><span className="eyebrow">RESULT</span>{result && <span className="result-meta">{result.changes !== undefined ? `${result.changes} 行受影响 · ${result.elapsedMs} ms` : `${result.rows.length} 行 · ${result.elapsedMs} ms${result.truncated ? ' · 已截断' : ''}`}</span>}</div>{loading && <button className="stop-btn"><Square size={13} fill="currentColor"/>停止</button>}</div>{result && <div className="result-table"><table className="resizable-grid" style={{ minWidth: `${columns.reduce((sum, column) => sum + (widths[columnWidthKey(tabId, column)] ?? measureColumnWidth(column, false)), 0)}px` }}><colgroup>{columns.map(column => <col key={column} style={{ width: widths[columnWidthKey(tabId, column)] ?? measureColumnWidth(column, false) }}/>)}</colgroup><GridHeader tabId={tabId} columns={columns} widths={widths} setWidth={(column, width) => setColumnWidth(tabId, column, width)}/><tbody>{result.rows.map((row, index) => <tr key={index}>{columns.map(column => <td key={column} className={row[column] === null ? 'null-value' : ''} title={formatValue(row[column])}>{formatValue(row[column])}</td>)}</tr>)}</tbody></table>{!result.rows.length && result.changes === undefined && <div className="no-rows">查询没有返回数据</div>}</div>}</div>
 }
 
 function MySQLDialog({ form, setForm, onCancel, onConnect, onPickCertificate }: { form: any; setForm: (value: any) => void; onCancel: () => void; onConnect: () => void; onPickCertificate: () => void }) {

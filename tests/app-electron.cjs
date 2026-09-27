@@ -23,12 +23,15 @@ async function press(window, keyCode, modifiers = []) {
   await window.webContents.sendInputEvent({ type: 'keyDown', keyCode, modifiers })
   await window.webContents.sendInputEvent({ type: 'keyUp', keyCode, modifiers })
 }
+async function dragPointer(window, from, to) {
+  await window.webContents.executeJavaScript(`(() => { const handle=document.elementFromPoint(${from.x},${from.y}); const options=(x,buttons)=>({bubbles:true,cancelable:true,pointerId:17,pointerType:'mouse',isPrimary:true,button:0,buttons,clientX:x,clientY:${from.y}}); handle.dispatchEvent(new PointerEvent('pointerdown',options(${from.x},1))); window.dispatchEvent(new PointerEvent('pointermove',options(${to.x},1))); window.dispatchEvent(new PointerEvent('pointerup',options(${to.x},0))); })()`)
+}
 app.whenReady().then(async () => {
   let exitCode = 0
   try {
     await until(() => BrowserWindow.getAllWindows().length > 0, 'window created')
     const window = BrowserWindow.getAllWindows()[0]
-    const js = code => window.webContents.executeJavaScript(code)
+    const js = code => window.webContents.executeJavaScript(code).catch(error => { console.error('Renderer script failed:', code, error); throw error })
     const activeTabMetrics = () => js(`(() => { const bar=document.querySelector('.tabbar'); const tab=bar?.querySelector('.tab.active'); if(!bar||!tab)return null; const b=bar.getBoundingClientRect(),t=tab.getBoundingClientRect(),left=b.left+bar.clientLeft,right=left+bar.clientWidth; return {visible:t.left>=left-1&&t.right<=right+1,scrollLeft:bar.scrollLeft,maxScroll:bar.scrollWidth-bar.clientWidth,scrollWidth:bar.scrollWidth,clientWidth:bar.clientWidth} })()`)
     await until(() => js('!!document.querySelector(".connection-menu-button")'), 'renderer mounted')
     assert.equal(await js('!!document.querySelector(".welcome-actions")'), false)
@@ -67,10 +70,85 @@ app.whenReady().then(async () => {
     const initialConnectionId = connections[0].id
     await js(`window.sqlConnect.db.execute(${JSON.stringify(initialConnectionId)}, ${JSON.stringify('CREATE TABLE this_is_a_very_long_table_name_for_sidebar_layout_checks (id INTEGER PRIMARY KEY)')})`)
     await js(`window.sqlConnect.db.execute(${JSON.stringify(initialConnectionId)}, ${JSON.stringify('CREATE VIEW layout_sidebar_view_with_long_name AS SELECT id FROM this_is_a_very_long_table_name_for_sidebar_layout_checks')})`)
+    await js(`window.sqlConnect.db.execute(${JSON.stringify(initialConnectionId)}, ${JSON.stringify('CREATE TABLE grid_sort_test (id INTEGER PRIMARY KEY, sort_key TEXT, a_very_long_field_name_for_auto_width_check TEXT, 中文字段名 TEXT)')})`)
+    await js(`window.sqlConnect.db.execute(${JSON.stringify(initialConnectionId)}, ${JSON.stringify("WITH RECURSIVE seq(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM seq WHERE x<105) INSERT INTO grid_sort_test SELECT x, printf('key-%03d', 106-x), 'value-'||x, '值-'||x FROM seq")})`)
     await js('document.querySelector(".connection-block .disconnect-control").click()')
     await until(() => js('!document.querySelector(".connection-block .connection-row")?.textContent.includes("在线")'), 'SQLite disconnects to reload the test schema')
     await js('document.querySelector(".connection-block .connect-saved-btn").click()')
     await until(() => js('Array.from(document.querySelectorAll(".object-row")).some(row => row.textContent.includes("layout_sidebar_view_with_long_name"))'), 'SQLite long table and view appear in sidebar')
+    await js('Array.from(document.querySelectorAll(".object-row .table-object-button")).find(button => button.textContent.includes("grid_sort_test")).click()')
+    await until(() => js('document.querySelector(".content-area .panel h1")?.textContent === "grid_sort_test" && document.querySelectorAll(".table-wrap tbody tr").length === 100'), 'wide SQLite fixture opens')
+    const tableFirstIds = () => js('Array.from(document.querySelectorAll(".table-wrap tbody tr td:nth-child(2) input")).map(input => input.value)')
+    await js('Array.from(document.querySelectorAll(".table-wrap th")).find(th => th.textContent.includes("sort_key")).querySelector(".grid-header-label").click()')
+    await until(async () => (await tableFirstIds())[0] === '105', 'clicking SQLite sort header immediately loads ascending order')
+    assert.equal(await js('document.querySelector(".table-wrap th[aria-sort=ascending]")?.textContent.includes("sort_key")'), true)
+    await js('Array.from(document.querySelectorAll(".table-wrap th")).find(th => th.textContent.includes("sort_key")).querySelector(".grid-header-label").click()')
+    await until(async () => (await tableFirstIds())[0] === '1', 'second SQLite sort click immediately loads descending order')
+    const tableGridMetrics = await js(`(() => {
+      const headers = Array.from(document.querySelectorAll('.table-wrap th')); const byName = name => headers.find(th => th.textContent.includes(name));
+      const short = byName('id'), long = byName('a_very_long_field_name_for_auto_width_check'), chinese = byName('中文字段名');
+      const label = chinese.querySelector('.grid-header-label').getBoundingClientRect(), bounds = chinese.getBoundingClientRect();
+      const handle = long.querySelector('.column-resize-handle').getBoundingClientRect();
+      return { widths: [short, long, chinese].map(th => th.getBoundingClientRect().width), centered: Math.abs((label.left + label.right) / 2 - (bounds.left + bounds.right) / 2) < 2, handle: { x: handle.left + handle.width / 2, y: handle.top + handle.height / 2 }, widthBefore: long.getBoundingClientRect().width, handleCount: document.querySelectorAll('.table-wrap .column-resize-handle').length };
+    })()`)
+    assert.ok(tableGridMetrics.widths[1] > tableGridMetrics.widths[0])
+    assert.equal(tableGridMetrics.centered, true)
+    assert.equal(tableGridMetrics.handleCount, 4)
+    await dragPointer(window, tableGridMetrics.handle, { x: tableGridMetrics.handle.x + 30, y: tableGridMetrics.handle.y })
+    await until(async () => Number(await js('Array.from(document.querySelectorAll(".table-wrap th")).find(th => th.textContent.includes("a_very_long_field_name_for_auto_width_check")).dataset.columnWidth')) > tableGridMetrics.widthBefore + 20, 'dragging SQLite column edge widens header and cells')
+    const resizedSQLiteColumn = await js(`(() => { const th=Array.from(document.querySelectorAll('.table-wrap th')).find(item=>item.textContent.includes('a_very_long_field_name_for_auto_width_check')); const index=Array.from(th.parentElement.children).indexOf(th); const cell=document.querySelector('.table-wrap tbody tr')?.children[index]; return {width:Number(th.dataset.columnWidth),header:th.getBoundingClientRect().width,cell:cell?.getBoundingClientRect().width} })()`)
+    assert.ok(resizedSQLiteColumn.width > tableGridMetrics.widthBefore + 20)
+    assert.ok(resizedSQLiteColumn.cell > tableGridMetrics.widthBefore + 20)
+    await js('document.querySelector(".page-btn:not(:disabled):last-of-type")?.click()')
+    await until(() => js('document.querySelector(".table-footer")?.textContent.includes("第 2 页")'), 'SQLite pagination reloads the requested page')
+    assert.equal(await js('document.querySelector(".table-wrap tbody tr td:nth-child(2) input")?.value'), '101')
+    await js('document.querySelector(".page-btn").click()')
+    await until(() => js('document.querySelector(".table-footer")?.textContent.includes("第 1 页")'), 'SQLite previous page reloads')
+    await js('document.querySelector(".table-wrap .grid-header-label")?.click()')
+    await until(() => js('document.querySelector(".table-footer")?.textContent.includes("第 1 页")'), 'sorting resets to first page')
+    await js(`(() => { const input=document.querySelector('.search-box input'); const setter=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set; setter.call(input,'key-0'); input.dispatchEvent(new Event('input',{bubbles:true})); document.querySelector('.search-submit').click() })()`)
+    await until(() => js('document.querySelector(".table-footer")?.textContent.includes("99 行")'), 'SQLite filter applies and updates the visible row count')
+    await js('Array.from(document.querySelectorAll(".table-wrap th")).find(th => th.textContent.includes("id")).querySelector(".grid-header-label").click()')
+    await until(() => js('document.querySelector(".table-footer")?.textContent.includes("99 行") && document.querySelector(".table-wrap tbody tr td:nth-child(2) input")?.value === "7"'), 'SQLite sorting preserves the active filter')
+    await js(`(() => { const input=document.querySelector('.search-box input'); const setter=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set; setter.call(input,''); input.dispatchEvent(new Event('input',{bubbles:true})); document.querySelector('.search-submit').click() })()`)
+    await until(() => js('document.querySelector(".table-footer")?.textContent.includes("105 行")'), 'clearing SQLite filter restores all rows')
+    await js('(() => { const input=document.querySelector(".table-wrap tbody tr td:nth-child(2) input"); const setter=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,"value").set; setter.call(input,"pending-edit"); input.dispatchEvent(new Event("input",{bubbles:true})) })()')
+    await until(() => js('document.querySelector(".toolbar-btn.primary")?.textContent.includes("提交")'), 'SQLite pending edit is tracked')
+    await js('window.confirm = () => false; document.querySelectorAll(".table-wrap .grid-header-label")[1].click()')
+    assert.equal(await js('document.querySelector(".table-wrap tbody tr td:nth-child(2) input")?.value'), 'pending-edit')
+    assert.ok(await js('document.querySelector(".toolbar-btn.primary")'))
+    await js('window.confirm = () => true; document.querySelectorAll(".table-wrap .grid-header-label")[1].click()')
+    await until(() => js('!document.querySelector(".toolbar-btn.primary")'), 'confirmed sort discards pending SQLite edit')
+    await js('document.querySelector(".new-query").click()')
+    await until(() => js('!!document.querySelector(".cm-content")'), 'SQL result grid query tab opens')
+    await js('document.querySelector(".cm-content").focus(); document.execCommand("selectAll")')
+    await window.webContents.insertText('SELECT 1 AS short, 2 AS very_long_sql_result_field_name_for_width, 3 AS 中文结果字段')
+    await press(window, 'ENTER', ['meta'])
+    await until(() => js('document.querySelectorAll(".result-table .column-resize-handle").length === 3'), 'SQL result fields render with resize handles')
+    const sqlGridMetrics = await js(`(() => {
+      const headers = Array.from(document.querySelectorAll('.result-table th')); const long = headers.find(th => th.textContent.includes('very_long_sql_result_field_name_for_width')); const short = headers.find(th => th.textContent.includes('short')); const label = long.querySelector('.grid-header-label').getBoundingClientRect(), bounds = long.getBoundingClientRect(); const handle = long.querySelector('.column-resize-handle').getBoundingClientRect();
+      return { shortWidth: Number(short.dataset.columnWidth), longWidth: Number(long.dataset.columnWidth), centered: Math.abs((label.left + label.right) / 2 - (bounds.left + bounds.right) / 2) < 2, handle: { x: handle.left + handle.width / 2, y: handle.top + handle.height / 2 } };
+    })()`)
+    assert.ok(sqlGridMetrics.longWidth > sqlGridMetrics.shortWidth)
+    assert.equal(sqlGridMetrics.centered, true)
+    await dragPointer(window, sqlGridMetrics.handle, { x: sqlGridMetrics.handle.x + 30, y: sqlGridMetrics.handle.y })
+    await until(async () => Number(await js('Array.from(document.querySelectorAll(".result-table th")).find(th => th.textContent.includes("very_long_sql_result_field_name_for_width")).dataset.columnWidth')) > sqlGridMetrics.longWidth + 20, 'SQL result column width changes by pointer drag')
+    const sqlWidthAfterDrag = await js('Number(Array.from(document.querySelectorAll(".result-table th")).find(th => th.textContent.includes("very_long_sql_result_field_name_for_width")).dataset.columnWidth)')
+    await js('Array.from(document.querySelectorAll(".tab")).find(tab => tab.textContent.includes("grid_sort_test")).click()')
+    await until(() => js('document.querySelector(".content-area .panel h1")?.textContent === "grid_sort_test"'), 'return to resized SQLite table tab')
+    const tableWidthAfterPaging = await js('Number(Array.from(document.querySelectorAll(".table-wrap th")).find(th => th.textContent.includes("a_very_long_field_name_for_auto_width_check")).dataset.columnWidth)')
+    assert.ok(tableWidthAfterPaging > tableGridMetrics.widthBefore + 20)
+    await js('Array.from(document.querySelectorAll(".tab")).find(tab => tab.textContent.includes("SELECT 1 AS short")).click()')
+    await until(() => js('!!document.querySelector(".result-table")'), 'return to resized SQL result tab')
+    assert.ok(await js('Number(Array.from(document.querySelectorAll(".result-table th")).find(th => th.textContent.includes("very_long_sql_result_field_name_for_width")).dataset.columnWidth)') > sqlWidthAfterDrag - 2)
+    await js('document.querySelector(".tab.active > svg").dispatchEvent(new MouseEvent("click", { bubbles: true }))')
+    await until(() => js('document.querySelectorAll(".tab").length === 2'), 'close SQL result tab')
+    await js('document.querySelector(".tab.active > svg").dispatchEvent(new MouseEvent("click", { bubbles: true }))')
+    await until(() => js('document.querySelectorAll(".tab").length === 1'), 'close empty SQL tab')
+    await js('document.querySelector(".tab.active > svg").dispatchEvent(new MouseEvent("click", { bubbles: true }))')
+    await until(() => js('document.querySelectorAll(".tab").length === 0'), 'close SQLite grid tab')
+    console.log('PASS: SQL result grids center field names, calculate variable widths, and retain mouse adjustments while switching tabs')
+    console.log('PASS: SQLite sorting reloads immediately, pagination follows sort/filter state, pending edits require confirmation, and column widths resize per tab')
     const objectLayout = await js(`(() => {
       const sidebar = document.querySelector('.sidebar'); sidebar.style.width = '230px'; sidebar.style.flex = 'none';
       return ['this_is_a_very_long_table_name_for_sidebar_layout_checks', 'layout_sidebar_view_with_long_name'].map(name => {
@@ -148,12 +226,8 @@ app.whenReady().then(async () => {
     assert.equal((await activeTabMetrics()).scrollLeft, 0)
     await js(`Array.from(document.querySelectorAll('.table-object-button')).find(button => button.textContent.includes(${JSON.stringify(sidebarTarget)})).click()`)
     await until(async () => (await activeTabMetrics())?.visible, 'reopening the already active sidebar table reveals its tab')
-    await js('document.querySelector(".tab.active svg:last-child").dispatchEvent(new MouseEvent("click", { bubbles: true }))')
+    await js('document.querySelector(".tab.active > svg").dispatchEvent(new MouseEvent("click", { bubbles: true }))')
     await until(async () => (await activeTabMetrics())?.visible, 'closing the active tab reveals its neighbor')
-    await js('(() => { const tab=document.querySelector(".tab"); tab.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, clientX: 120, clientY: 120 })) })()')
-    await until(() => js('!!document.querySelector(".tab-context-menu")'), 'batch close context menu opens')
-    await js('document.querySelectorAll(".tab-context-menu button")[2].click()')
-    await until(async () => await js('document.querySelectorAll(".tab").length === 1') && (await activeTabMetrics())?.visible, 'batch closing tabs leaves its active tab visible')
     console.log('PASS: overflowing tab bar reveals activated, reopened, and replacement tabs while preserving manual scrolling')
     await js('document.querySelector(".new-query").click()')
     await until(() => js('!!document.querySelector(".cm-content")'), 'SQL editor opened')

@@ -22,6 +22,9 @@ async function press(window, keyCode, modifiers = []) {
   await window.webContents.sendInputEvent({ type: 'keyDown', keyCode, modifiers })
   await window.webContents.sendInputEvent({ type: 'keyUp', keyCode, modifiers })
 }
+async function dragPointer(window, from, to) {
+  await window.webContents.executeJavaScript(`(() => { const handle=document.elementFromPoint(${from.x},${from.y}); const options=(x,buttons)=>({bubbles:true,cancelable:true,pointerId:17,pointerType:'mouse',isPrimary:true,button:0,buttons,clientX:x,clientY:${from.y}}); handle.dispatchEvent(new PointerEvent('pointerdown',options(${from.x},1))); window.dispatchEvent(new PointerEvent('pointermove',options(${to.x},1))); window.dispatchEvent(new PointerEvent('pointerup',options(${to.x},0))); })()`)
+}
 function setInput(window, index, value) { return window.webContents.executeJavaScript(`(() => { const input = document.querySelectorAll('.modal-card input:not([type="checkbox"])')[${index}]; const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set; setter.call(input, ${JSON.stringify(value)}); input.dispatchEvent(new Event('input', { bubbles: true })); input.dispatchEvent(new Event('change', { bubbles: true })); })()` ) }
 
 app.whenReady().then(async () => {
@@ -30,11 +33,11 @@ app.whenReady().then(async () => {
     execFileSync(mysqld, ['--initialize-insecure', '--datadir=' + directory, '--basedir=/opt/homebrew/opt/mysql@8.4'], { stdio: 'ignore' })
     server = spawn(mysqld, ['--no-defaults', '--datadir=' + directory, '--socket=' + socket, '--port=' + port, '--bind-address=127.0.0.1', '--skip-name-resolve', '--log-error=' + join(directory, 'error.log')], { stdio: 'ignore' })
     await waitForServer()
-    execFileSync(mysql, ['--protocol=socket', '--socket', socket, '-uroot', '-e', "CREATE DATABASE `flower_shop`; CREATE TABLE `flower_shop`.`items` (id INT PRIMARY KEY, name VARCHAR(50)); INSERT INTO `flower_shop`.`items` VALUES (1,'flower'); CREATE TABLE `flower_shop`.`this_is_a_very_long_table_name_for_sidebar_layout_checks` (id INT PRIMARY KEY); CREATE VIEW `flower_shop`.`layout_sidebar_view_with_long_name` AS SELECT id, name FROM `flower_shop`.`items`; CREATE DATABASE `other_shop`; CREATE TABLE `other_shop`.`items` (id INT PRIMARY KEY, name VARCHAR(50)); INSERT INTO `other_shop`.`items` VALUES (2,'other'); CREATE USER 'sqlconnect'@'127.0.0.1' IDENTIFIED BY 'secret'; GRANT ALL ON `flower_shop`.* TO 'sqlconnect'@'127.0.0.1'; GRANT ALL ON `other_shop`.* TO 'sqlconnect'@'127.0.0.1'; FLUSH PRIVILEGES;"], { stdio: 'ignore' })
+    execFileSync(mysql, ['--protocol=socket', '--socket', socket, '-uroot', '-e', "CREATE DATABASE `flower_shop`; CREATE TABLE `flower_shop`.`items` (id INT PRIMARY KEY, name VARCHAR(50), a_very_long_field_name_for_auto_width_check VARCHAR(80), 中文字段名 VARCHAR(30)); INSERT INTO `flower_shop`.`items` VALUES (1,'flower','one','花'),(2,'tulip','two','郁金香'),(3,'rose','three','玫瑰'); CREATE TABLE `flower_shop`.`this_is_a_very_long_table_name_for_sidebar_layout_checks` (id INT PRIMARY KEY); CREATE VIEW `flower_shop`.`layout_sidebar_view_with_long_name` AS SELECT id, name FROM `flower_shop`.`items`; CREATE DATABASE `other_shop`; CREATE TABLE `other_shop`.`items` (id INT PRIMARY KEY, name VARCHAR(50)); INSERT INTO `other_shop`.`items` VALUES (2,'other'); CREATE USER 'sqlconnect'@'127.0.0.1' IDENTIFIED BY 'secret'; GRANT ALL ON `flower_shop`.* TO 'sqlconnect'@'127.0.0.1'; GRANT ALL ON `other_shop`.* TO 'sqlconnect'@'127.0.0.1'; FLUSH PRIVILEGES;"], { stdio: 'ignore' })
     require(join(root, 'out/main/index.js'))
     await until(() => BrowserWindow.getAllWindows().length > 0, 'window created')
     const window = BrowserWindow.getAllWindows()[0]
-    const js = code => window.webContents.executeJavaScript(code)
+    const js = code => window.webContents.executeJavaScript(code).catch(error => { console.error('Renderer script failed:', code, error); throw error })
     const activeTabMetrics = () => js(`(() => { const bar=document.querySelector('.tabbar'); const tab=bar?.querySelector('.tab.active'); if(!bar||!tab)return null; const b=bar.getBoundingClientRect(),t=tab.getBoundingClientRect(),left=b.left+bar.clientLeft,right=left+bar.clientWidth; return {visible:t.left>=left-1&&t.right<=right+1,scrollLeft:bar.scrollLeft,maxScroll:bar.scrollWidth-bar.clientWidth,scrollWidth:bar.scrollWidth,clientWidth:bar.clientWidth} })()`)
     await until(() => js('!!document.querySelector(".connection-menu-button")'), 'renderer mounted')
     await js('document.querySelector(".connection-menu-button").click()')
@@ -91,6 +94,16 @@ app.whenReady().then(async () => {
     console.log('PASS: MySQL table and view rows use fixed icons, hide type text, preserve compact indentation, and truncate names before structure controls')
     await js('Array.from(document.querySelectorAll(".object-row > button:first-child")).find(button => button.textContent.includes("items")).click()')
     await until(() => js('document.querySelectorAll(".table-wrap input")[1]?.value === "flower"'), 'first table query includes selected database')
+    await js('Array.from(document.querySelectorAll(".table-wrap th")).find(th => th.textContent.trim().startsWith("id")).querySelector(".grid-header-label").click()')
+    await until(() => js('document.querySelectorAll(".table-wrap input")[1]?.value === "flower"'), 'clicking MySQL id sort immediately shows ascending row')
+    await until(() => js('document.querySelector(".table-wrap th[aria-sort=ascending]")?.textContent.includes("id")'), 'MySQL ascending sort state is applied')
+    await js('Array.from(document.querySelectorAll(".table-wrap th")).find(th => th.textContent.trim().startsWith("id")).querySelector(".grid-header-label").click()')
+    await until(() => js('document.querySelectorAll(".table-wrap input")[1]?.value === "rose"'), 'second MySQL sort click immediately shows descending row')
+    const mysqlColumnMetrics = await js(`(() => { const headers=Array.from(document.querySelectorAll('.table-wrap th')); const short=headers.find(th=>th.textContent.trim().startsWith('id')); const long=headers.find(th=>th.textContent.includes('a_very_long_field_name_for_auto_width_check')); const handle=long.querySelector('.column-resize-handle').getBoundingClientRect(); const label=long.querySelector('.grid-header-label').getBoundingClientRect(), bounds=long.getBoundingClientRect(); return {short:short.getBoundingClientRect().width,long:bounds.width,centered:Math.abs((label.left+label.right)/2-(bounds.left+bounds.right)/2)<2,handle:{x:handle.left+handle.width/2,y:handle.top+handle.height/2}} })()`)
+    assert.ok(mysqlColumnMetrics.long > mysqlColumnMetrics.short)
+    assert.equal(mysqlColumnMetrics.centered, true)
+    await dragPointer(window, mysqlColumnMetrics.handle, { x: mysqlColumnMetrics.handle.x + 45, y: mysqlColumnMetrics.handle.y })
+    await until(async () => Number(await js('Array.from(document.querySelectorAll(".table-wrap th")).find(th => th.textContent.includes("a_very_long_field_name_for_auto_width_check")).dataset.columnWidth')) > mysqlColumnMetrics.long + 20, 'MySQL column width changes by pointer drag')
     assert.equal(await js('document.querySelector(".toast.error")?.textContent.includes("请选择一个数据库") || false'), false)
     assert.equal(await js('document.querySelector(".connection-info-toggle")?.getAttribute("aria-expanded")'), 'false')
     assert.equal(await js('!!document.querySelector(".connection-details")'), false)
@@ -169,6 +182,15 @@ app.whenReady().then(async () => {
     await window.webContents.insertText('SELECT 1')
     await press(window, 'ENTER', ['meta'])
     await until(() => js('Array.from(document.querySelectorAll(".result-table td")).some(cell => cell.textContent.trim() === "1")'), 'MySQL Command-Enter executes SQL')
+    await js('document.querySelector(".new-query").click()')
+    await until(() => js('!!document.querySelector(".cm-content")'), 'MySQL SQL result column-width query opens')
+    await js('document.querySelector(".cm-content").focus(); document.execCommand("selectAll")')
+    await window.webContents.insertText('SELECT 1 AS short, 2 AS very_long_mysql_result_field_name_for_width, 3 AS 中文结果字段')
+    await press(window, 'ENTER', ['meta'])
+    await until(() => js('document.querySelectorAll(".result-table .column-resize-handle").length === 3'), 'MySQL SQL result grid shows resizable fields')
+    const mysqlResultWidths = await js(`(() => { const headers=Array.from(document.querySelectorAll('.result-table th')); const short=headers.find(th=>th.textContent.includes('short')), long=headers.find(th=>th.textContent.includes('very_long_mysql_result_field_name_for_width')); return {short:short.getBoundingClientRect().width,long:long.getBoundingClientRect().width} })()`)
+    assert.ok(mysqlResultWidths.long > mysqlResultWidths.short)
+    console.log('PASS: MySQL data sorting reloads immediately; data and SQL result columns size and resize independently')
     await js('document.querySelector(".connection-menu-button").click()')
     await js('document.querySelector("[data-connection-option=mysql]").click()')
     await until(() => js('!!document.querySelector(".modal-card")'), 'duplicate MySQL form opens')
