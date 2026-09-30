@@ -6,7 +6,7 @@ export type MySQLConnection = {
 }
 export type Connection = SQLiteConnection | MySQLConnection
 export type ConnectResult = { ok: true; connection: Connection; reused: boolean }
-export type SetReadonlyResult = { connection: MySQLConnection; connected: boolean }
+export type SetReadonlyResult = { connection: Connection; connected: boolean }
 
 export type TableInfo = { name: string; type: 'table' | 'view'; sql?: string }
 export type ColumnInfo = { cid: number; name: string; type: string; notnull: number; dflt_value: string | null; pk: number }

@@ -11,6 +11,8 @@ type PendingRequest = {
 export class WorkerClient {
   private pending = new Map<string, PendingRequest>()
   private closed = false
+  private exited = false
+  private exitWaiters = new Set<() => void>()
 
   constructor(private worker: UtilityProcess, private onClose: () => void) {
     worker.on('message', (message: any) => {
@@ -25,7 +27,12 @@ export class WorkerClient {
       if (message.ok) request.resolve(message.result)
       else request.reject(new Error(message.error || '数据库操作失败'))
     })
-    worker.on('exit', code => this.finish(new Error(`数据库进程已退出（${code}），请重新连接`)))
+    worker.on('exit', code => {
+      this.exited = true
+      for (const resolve of this.exitWaiters) resolve()
+      this.exitWaiters.clear()
+      this.finish(new Error(`数据库进程已退出（${code}），请重新连接`))
+    })
     worker.on('error', () => this.close('数据库进程发生异常，请重新连接'))
   }
 
@@ -47,6 +54,35 @@ export class WorkerClient {
     if (this.closed) return
     this.finish(new Error(message))
     this.worker.kill()
+  }
+
+  async disconnectAndWait(connectionId: string, timeoutMs = 5000) {
+    try {
+      await this.request('disconnect', { id: connectionId }, timeoutMs)
+    } catch (error) {
+      this.close('数据库连接关闭失败，已终止旧进程')
+      await this.waitForExit(timeoutMs)
+      throw error
+    }
+    this.close('数据库连接已关闭')
+    await this.waitForExit(timeoutMs)
+  }
+
+  private waitForExit(timeoutMs: number) {
+    if (this.exited) return Promise.resolve(true)
+    return new Promise<boolean>(resolve => {
+      let done = false
+      const finish = (exited: boolean) => {
+        if (done) return
+        done = true
+        clearTimeout(timer)
+        this.exitWaiters.delete(onExit)
+        resolve(exited)
+      }
+      const onExit = () => finish(true)
+      const timer = setTimeout(() => finish(this.exited), timeoutMs)
+      this.exitWaiters.add(onExit)
+    })
   }
 
   private finish(error: Error) {

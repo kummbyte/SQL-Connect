@@ -5,7 +5,7 @@
 ## 项目与执行环境
 
 - 产品：SQL Connect，类似 Navicat 的桌面数据库客户端，支持普通本地 SQLite 文件和 TCP/TLS MySQL 连接。
-- 当前应用版本：1.3.1（界面状态栏显示 1.3）。
+- 当前应用版本：1.3.2（界面状态栏显示 1.3）。
 - 项目源目录：`/Users/wuqiang/Projects/SQL-Connect`。在当前 Mac 本地安装依赖、运行测试和打包，不自动切换到 WSL。
 - 当前目标平台：Apple Silicon macOS（arm64）。Windows、SQLCipher、远程数据库不属于首版已验证范围。
 - 使用 npm，维护 `package.json` 与 `package-lock.json`；不要随意混用包管理器或删除锁文件。
@@ -155,7 +155,7 @@ process.on('message', request => handle(request))
 
 - 当前已验证 SQLite 连接/新建及错误恢复，以及隔离临时 MySQL 8.4 实例的连接、多数据库浏览、结构读取、分页筛选、独立 SQL 会话、InnoDB 表数据编辑和只读/读写模式；SSH 隧道和客户端证书认证仍未实现。
 - 连接配置按 SQLite 规范化文件路径或 MySQL 主机/端口/用户/TLS/CA 身份去重；历史重复配置启动时合并，SQLite 重复项任一只读时保留只读。
-- 当前表格写入依赖 rowid；复合主键、WITHOUT ROWID 表、生成列、BLOB 和大整数的完整编辑支持不能仅凭现有共享类型或界面推断。
+- SQLite 表格写入使用 rowid；MySQL InnoDB 表格编辑支持单列及复合主键。SQLite WITHOUT ROWID 表、生成列、BLOB 和大整数的完整编辑支持不能仅凭共享类型或界面推断。
 - 显式事务状态展示、停止按钮到取消 API 的完整联动、SQL 选区执行、字段级筛选等，后续开发前应检查实现与测试，不沿用早期交付描述作为完成证据。SQL 编辑器当前支持关键字 Tab 补全和 ⌘ Enter 执行全文，仍不支持选区执行。
 - 变更数据写入逻辑时必须验证事务回滚、并发修改冲突与值类型保持。表格操作使用参数绑定并正确转义标识符，不拼接用户输入值到 SQL。
 - 文档修改无需重复运行应用测试；运行时修改按受影响调用链执行相应回归，并明确报告未验证范围。
@@ -181,7 +181,7 @@ process.on('message', request => handle(request))
 - 侧栏底部不再提供“断开当前连接”；每个在线连接行最右侧使用 `Unplug` 图标按钮，提供“断开连接”悬停提示和无障碍标签。离线连接保留相同宽度的占位，避免长名称或连接状态变化造成布局跳动。
 - 连接行由展开按钮和操作区域组成，断开图标直接使用所在行的连接 ID，不会触发行展开、收起或其他连接的断开。按钮支持键盘操作，断开期间禁止重复请求。
 - 断开前检查该连接标签的未提交修改；取消确认会保留连接、标签和缓存，确认后等待 MySQL 查询会话释放，再关闭连接并清理目标连接的标签、结果、结构、SQL 文本、暂存修改和数据库树缓存。其他连接及其标签保持不变，当前标签按相邻标签规则切换。
-- SQLite 只读/读写切换复用同一断开确认流程，取消时不保存权限变化也不重连。断开失败只显示错误并保留该连接状态。
+- SQLite 和 MySQL 的模式切换都保留标签与视图状态；读写切到只读时确认放弃暂存编辑，取消不改变连接。只读切回读写不提示，在线切换会验证候选连接并重载表数据和结构。断开失败只显示错误并保留该连接状态。
 - `tests/app-electron.cjs` 覆盖多 SQLite 连接的目标行断开、重连和旧底部入口移除；`tests/app-mysql-electron.cjs` 覆盖隔离 MySQL 连接的断开、重新输入密码后重连及数据库树恢复。
 
 ### 已保存连接详情与手动连接
@@ -258,3 +258,13 @@ process.on('message', request => handle(request))
 - 在线 MySQL 从读写切换为只读时，仍显示确认框，因为旧会话会结束且切换会放弃表格暂存修改；离线只更新已保存模式。从只读切换回读写时不再显示确认框，直接建立并验证新会话，然后按现有流程刷新表格和结构。候选连接失败仍保留只读模式和旧连接。
 - `tests/app-mysql-electron.cjs` 验证切换到只读会显示确认并列出未提交标签，切回读写时 `window.confirm` 不会被调用，且表格数据会重新读取。2026-10-01 验证：`npm run typecheck`、`npm run test:app:mysql`、`npm run test:app`、`npm run dist:dir`，以及以 `dist/mac-arm64/SQL Connect.app/Contents/Resources/app.asar` 为目标的两套界面测试均通过。
 - 用户保存并退出 1.3.0 后，已将新版完整复制到桌面应用路径并启动。`com.sqlconnect.app`、版本 `1.3.1` 与 ASAR SHA-256 `4bf0d4c662a64cb59dd6067a0c17d307ef6882926d75ae7656d122a1e5118b61` 已与 `dist/mac-arm64/SQL Connect.app` 核对一致；启动窗口正常，连接均离线。旧版备份在 `dist/backups/Desktop-app.before-readwrite-no-confirm-20261001.app`。
+
+### SQLite 与 MySQL 共用模式切换（1.3.2）
+
+- `db.setReadonly` 现为 SQLite/MySQL 共用入口。在线切换时先以目标模式验证候选 worker，再保存配置并替换会话；SQLite 旧 worker 收到关闭确认并结束后，数据库句柄释放、打开事务回滚。SQLite 候选打开或配置保存失败时，旧连接、模式及暂存输入保留；在线普通设置保存不能绕过专用模式切换入口。
+- 在线读写切到只读时显示确认，列出有暂存编辑的标签；取消保持状态。只读切回读写直接切换。离线切换仅保存配置，不自动连接。成功切换保留标签顺序、活动标签、SQL 文本、数据库上下文、筛选、排序、分页和列宽；刷新表数据、结构和 schema，SQL 标签不自动执行。暂存修改仅在用户确认切只读后清除。
+- 切换期间拒绝目标连接的新数据库请求，并阻止关闭相关标签、断开或删除连接；SQL 编辑器、数据筛选和数据库选择也禁用，其他连接继续使用。切换后递增请求代次，忽略旧结果。表或结构刷新失败显示“模式已切换，数据刷新失败”，保留标签并提供重新读取入口。
+- SQLite 表格查询和结构元数据会正确报告只读可编辑状态；SQLite SQL 写入沿用只读文件句柄保护。SQLite 只读连接不改变服务器或全局数据库设置。
+- `tests/worker-client.test.cjs` 覆盖旧 worker 关闭确认和退出等待；`tests/worker-electron.cjs` 覆盖只读 SQLite 元数据和拒绝表格写入；`tests/settings-electron.cjs` 覆盖离线模式持久化；`tests/app-electron.cjs` 覆盖确认/取消、事务回滚、标签/文本/视图保留、拒绝绕过、打开及保存失败、刷新失败重试。MySQL 保持原有候选连接失败及 BrowserWindow 模式回归。
+- 2026-10-01 验证：`npm run typecheck`、`npm test`、`npm run test:electron`、`npm run test:mysql`、`npm run test:settings`、`npm run test:app`、`npm run test:app:mysql`、`npm run dist:dir` 均通过；两套界面测试再次以 `dist/mac-arm64/SQL Connect.app/Contents/Resources/app.asar` 为目标通过。测试使用真实 Electron worker、隔离 MySQL 8.4、临时 SQLite 和独立配置目录。
+- 桌面应用已在确认连接离线后从 `dist/mac-arm64/SQL Connect.app` 完整替换并启动。桌面与产物 `com.sqlconnect.app`、版本 `1.3.2` 和 ASAR SHA-256 `9d65004b228b1d5efac0ad44aba954855ac47946bde55b58d73f4588da2c8606` 一致；启动窗口正常，用户保存的连接均离线且配置保持原位。旧版完整备份在 `dist/backups/Desktop-app.before-sqlite-mode-unify-20261001.app`。

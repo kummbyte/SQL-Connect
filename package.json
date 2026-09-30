@@ -1,6 +1,6 @@
 {
   "name": "sql-connect",
-  "version": "1.3.1",
+  "version": "1.3.2",
   "description": "A focused SQLite desktop client for macOS",
   "main": "out/main/index.js",
   "author": "SQL Connect",

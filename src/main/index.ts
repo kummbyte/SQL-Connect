@@ -165,34 +165,42 @@ async function connect(connection: Connection) {
   pendingConnects.set(key, request)
   try { return await request } finally { pendingConnects.delete(key) }
 }
-async function setMySQLReadonly(connectionId: string, readonly: boolean): Promise<SetReadonlyResult> {
+async function setConnectionReadonly(connectionId: string, readonly: boolean): Promise<SetReadonlyResult> {
   ensureSettingsLoaded()
   const current = savedConnections.find(item => item.id === connectionId)
-  if (!current || current.type !== 'mysql') throw new Error('MySQL 连接不存在')
-  const target = { ...current, readonly: !!readonly }
+  if (!current) throw new Error('连接不存在')
+  const target: Connection = { ...current, readonly: !!readonly }
   if (current.readonly === target.readonly) return { connection: target, connected: workers.has(connectionId) }
   if (readonlyTransitions.has(connectionId)) throw new Error('连接模式正在切换')
   if (pendingConnects.has(connectionIdentity(current))) throw new Error('连接正在建立，请稍后再切换模式')
   if ((activeRequests.get(connectionId) || 0) > 0) throw new Error('连接正在执行操作，请等待完成后再切换模式')
   readonlyTransitions.add(connectionId)
   let candidate: WorkerClient | undefined
+  let persisted = false
   try {
     const oldWorker = workers.get(connectionId)
     if (oldWorker) {
-      const password = sessionPasswords.get(connectionId)
-      if (!password) throw new Error('请先重新连接并输入 MySQL 密码')
       candidate = createWorker(target)
-      await candidate.request('connect', { ...target, password }, 15000)
+      if (target.type === 'mysql') {
+        const password = sessionPasswords.get(connectionId)
+        if (!password) throw new Error('请先重新连接并输入 MySQL 密码')
+        await candidate.request('connect', { ...target, password }, 15000)
+      } else await candidate.request('connect', { ...target, create: false }, 15000)
     }
-    const persisted = saveSettingsInternal(savedConnections.map(item => item.id === connectionId ? target : item))
+    const updated = saveSettingsInternal(savedConnections.map(item => item.id === connectionId ? target : item))
+    persisted = true
     if (candidate) {
+      if (current.type === 'sqlite') await oldWorker!.disconnectAndWait(connectionId)
+      else oldWorker!.close('连接模式已切换')
       workers.set(connectionId, candidate)
-      oldWorker?.close('连接模式已切换')
       candidate = undefined
     }
-    return { connection: persisted.find(item => item.id === connectionId) as MySQLConnection, connected: !!oldWorker }
+    return { connection: updated.find(item => item.id === connectionId)!, connected: !!oldWorker }
   } catch (error) {
     candidate?.close('模式切换失败')
+    if (persisted) {
+      try { saveSettingsInternal(savedConnections.map(item => item.id === connectionId ? current : item)) } catch { /* retain the original in-memory mode if disk recovery also fails */ }
+    }
     throw error
   } finally { readonlyTransitions.delete(connectionId) }
 }
@@ -216,7 +224,7 @@ function registerIpc() {
     ensureSettingsLoaded()
     for (const connection of connections) {
       const saved = savedConnections.find(item => item.id === connection.id)
-      if (saved?.type === 'mysql' && connection.type === 'mysql' && workers.has(connection.id) && saved.readonly !== connection.readonly) throw new Error('MySQL 在线模式必须通过模式切换入口修改')
+      if (saved && workers.has(connection.id) && saved.readonly !== connection.readonly) throw new Error(`${saved.type === 'mysql' ? 'MySQL' : 'SQLite'} 在线模式必须通过模式切换入口修改`)
       if (readonlyTransitions.has(connection.id)) throw new Error('连接模式正在切换，请稍后保存')
     }
     return saveSettingsInternal(connections)
@@ -229,7 +237,7 @@ function registerIpc() {
   ipcMain.handle('dialog:openCertificate', async () => { const result = await dialog.showOpenDialog(win, { properties: ['openFile'], filters: [{ name: 'Certificate', extensions: ['pem', 'crt', 'cer'] }, { name: 'All files', extensions: ['*'] }] }); return result.canceled ? null : result.filePaths[0] })
   ipcMain.handle('dialog:saveFile', async () => { const result = await dialog.showSaveDialog(win, { defaultPath: 'database.sqlite', filters: [{ name: 'SQLite database', extensions: ['sqlite', 'db'] }] }); return result.canceled ? null : result.filePath })
   ipcMain.handle('db:connect', (_event, connection: Connection) => connect(connection))
-  ipcMain.handle('db:setReadonly', (_event, id: string, readonly: boolean) => setMySQLReadonly(id, readonly))
+  ipcMain.handle('db:setReadonly', (_event, id: string, readonly: boolean) => setConnectionReadonly(id, readonly))
   ipcMain.handle('db:disconnect', (_event, id: string) => { if (readonlyTransitions.has(id)) throw new Error('连接模式正在切换，请稍后断开'); workers.get(id)?.close(); sessionPasswords.delete(id); return true })
   ipcMain.handle('db:databases', (_event, id: string) => sendWorker(id, 'databases', { connectionId: id }))
   ipcMain.handle('db:schema', (_event, id: string, database?: string) => sendWorker(id, 'schema', { connectionId: id, database }))
@@ -238,7 +246,7 @@ function registerIpc() {
   ipcMain.handle('db:execute', (_event, id: string, sql: string, sessionId?: string, database?: string) => sendWorker(id, 'execute', { connectionId: id, sql, sessionId, database }))
   ipcMain.handle('db:closeSession', (_event, id: string, sessionId: string) => sendWorker(id, 'closeSession', { connectionId: id, sessionId }))
   ipcMain.handle('db:apply', (_event, id: string, changes: PendingChange[], database?: string) => sendWorker(id, 'apply', { connectionId: id, changes, database }))
-  ipcMain.handle('db:cancel', (_event, id: string) => { workers.get(id)?.close('操作已取消，连接已断开'); return true })
+  ipcMain.handle('db:cancel', (_event, id: string) => { if (readonlyTransitions.has(id)) throw new Error('连接模式正在切换，请稍后取消'); workers.get(id)?.close('操作已取消，连接已断开'); return true })
 }
 function createWindow() { win = new BrowserWindow({ width: 1440, height: 920, minWidth: 1050, minHeight: 700, title: 'SQL Connect', backgroundColor: '#101522', webPreferences: { preload: join(__dirname, '../preload/index.js'), contextIsolation: true, nodeIntegration: false, sandbox: true } }); if (process.env.ELECTRON_RENDERER_URL) win.loadURL(process.env.ELECTRON_RENDERER_URL); else win.loadFile(join(__dirname, '../renderer/index.html')) }
 app.whenReady().then(() => { registerIpc(); createWindow(); app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow() }) })

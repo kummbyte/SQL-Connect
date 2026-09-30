@@ -62,3 +62,14 @@ test('send failures, process errors and cancellation settle pending requests', a
     assert.equal(worker.killed, true)
   }
 })
+test('disconnectAndWait acknowledges SQLite close before waiting for worker exit', async () => {
+  const worker = new FakeWorker()
+  worker.kill = () => { worker.killed = true; queueMicrotask(() => worker.emit('exit', 0)) }
+  const client = new WorkerClient(worker, () => {})
+  const disconnect = client.disconnectAndWait('sqlite-1', 1000)
+  assert.deepEqual(worker.messages[0], { id: worker.messages[0].id, type: 'disconnect', payload: { id: 'sqlite-1' } })
+  worker.emit('message', { id: worker.messages[0].id, ok: true, result: true })
+  await disconnect
+  assert.equal(worker.killed, true)
+  await assert.rejects(client.request('schema', {}), /连接已断开/)
+})

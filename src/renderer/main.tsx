@@ -109,6 +109,7 @@ function App() {
   const [tableViews, setTableViews] = useState<Record<string, TableViewState>>({})
   const [columnWidths, setColumnWidths] = useState<Record<string, number>>({})
   const tableRequestIds = useRef(new Map<string, number>())
+  const connectionModeGenerations = useRef(new Map<string, number>())
   const [structures, setStructures] = useState<Record<string, Structure>>({})
   const [pending, setPending] = useState<Record<string, PendingChange[]>>({})
   const [committingTabs, setCommittingTabs] = useState<string[]>([])
@@ -186,6 +187,7 @@ function App() {
   const active = tabs.find(t => t.id === activeTab)
   const activeConnection = active?.connectionId || connected[0] || ''
   const activeConnectionConfig = connections.find(connection => connection.id === activeConnection)
+  const activeConnectionReadonly = activeConnectionConfig?.readonly === true
   const activeMySQLReadonly = activeConnectionConfig?.type === 'mysql' && activeConnectionConfig.readonly === true
   const activeDatabase = active?.database || selectedDatabase[activeConnection] || ''
 
@@ -199,6 +201,7 @@ function App() {
     setExpandedDatabases(next)
   }
   function toggleDatabase(connectionId: string, database: string) {
+    if (readonlySwitchingRef.current.has(connectionId)) return
     const currentlyExpanded = expandedDatabasesRef.current[connectionId] || []
     const isExpanded = currentlyExpanded.includes(database)
     storeExpandedDatabases(connectionId, isExpanded ? currentlyExpanded.filter(name => name !== database) : [...currentlyExpanded, database])
@@ -254,10 +257,10 @@ function App() {
       setLoading(false)
     }
   }
-  async function loadSchema(connectionId: string, database?: string) { try { const items = await window.sqlConnect.db.schema(connectionId, database); if (!deletedConnectionIdsRef.current.has(connectionId)) setSchema(v => ({ ...v, [`${connectionId}|${database || ''}`]: items })) } catch (error) { if (!deletedConnectionIdsRef.current.has(connectionId)) notify(error instanceof Error ? error.message : String(error), 'error') } }
+  async function loadSchema(connectionId: string, database?: string) { const generation = connectionModeGenerations.current.get(connectionId) || 0; try { const items = await window.sqlConnect.db.schema(connectionId, database); if (!deletedConnectionIdsRef.current.has(connectionId) && generation === (connectionModeGenerations.current.get(connectionId) || 0)) setSchema(v => ({ ...v, [`${connectionId}|${database || ''}`]: items })) } catch (error) { if (!deletedConnectionIdsRef.current.has(connectionId) && generation === (connectionModeGenerations.current.get(connectionId) || 0)) notify(error instanceof Error ? error.message : String(error), 'error') } }
   async function addMySQL() { const item: MySQLConnection = { type: 'mysql', id: editingMySQLId || uid(), name: mysqlForm.name.trim() || 'MySQL 连接', host: mysqlForm.host.trim(), port: Number(mysqlForm.port) || 3306, user: mysqlForm.user.trim(), password: mysqlForm.password, rememberPassword: mysqlForm.rememberPassword, readonly: mysqlForm.readonly, tls: mysqlForm.tls, caPath: mysqlForm.caPath || undefined }; const ok = await connect(item); if (ok) { setEditingMySQLId(null); setShowMySQL(false) } }
   async function toggleConnection(item: Connection) {
-    if (disconnectingRef.current.has(item.id) || connectingRef.current.has(item.id)) return
+    if (disconnectingRef.current.has(item.id) || connectingRef.current.has(item.id) || readonlySwitchingRef.current.has(item.id)) return
     const willExpand = !expanded[item.id]
     setExpanded(v => ({ ...v, [item.id]: willExpand }))
     if (willExpand && connected.includes(item.id) && item.type === 'mysql' && !mysqlDatabases[item.id]) {
@@ -347,68 +350,76 @@ function App() {
   }
   async function toggleReadonly(item: Connection) {
     if (disconnectingRef.current.has(item.id) || connectingRef.current.has(item.id) || readonlySwitchingRef.current.has(item.id)) return
-    if (item.type === 'mysql') {
-      const targetTabs = tabsRef.current.filter(tab => tab.connectionId === item.id)
-      if (targetTabs.some(tab => committingTabsRef.current.has(tab.id))) { notify('表格正在提交，请稍后再切换模式', 'info'); return }
-      const dirtyTabs = targetTabs.filter(tab => (pending[tab.id] || []).length > 0)
-      const targetReadonly = !item.readonly
-      const dirtyList = dirtyTabs.length ? `\n\n以下标签有未提交修改，切换后将放弃：\n${dirtyTabs.map(tab => `• ${tab.title}`).join('\n')}` : ''
-      if (connected.includes(item.id) && targetReadonly && !window.confirm(`将切换为只读模式并重新连接。旧数据库会话将结束，其中的未提交事务会被回滚。${dirtyList}\n\n继续吗？`)) return
-      readonlySwitchingRef.current.add(item.id)
-      setReadonlySwitching(v => [...new Set([...v, item.id])])
-      try {
-        const result = await window.sqlConnect.db.setReadonly(item.id, targetReadonly)
-        setConnections(current => current.map(connection => connection.id === item.id ? result.connection : connection))
+    const targetTabs = tabsRef.current.filter(tab => tab.connectionId === item.id)
+    if (targetTabs.some(tab => committingTabsRef.current.has(tab.id))) { notify('表格正在提交，请稍后再切换模式', 'info'); return }
+    const targetReadonly = !item.readonly
+    const isConnected = connected.includes(item.id)
+    const dirtyTabs = targetTabs.filter(tab => (pending[tab.id] || []).length > 0)
+    const dirtyList = dirtyTabs.length ? `\n\n以下标签有未提交修改，切换后将放弃：\n${dirtyTabs.map(tab => `• ${tab.title}`).join('\n')}` : ''
+    if (isConnected && targetReadonly && !window.confirm(`将切换为只读模式并重新连接。旧数据库会话将结束，其中的未提交事务会被回滚。${dirtyList}\n\n继续吗？`)) return
+    readonlySwitchingRef.current.add(item.id)
+    setReadonlySwitching(v => [...new Set([...v, item.id])])
+    try {
+      const result = await window.sqlConnect.db.setReadonly(item.id, targetReadonly)
+      connectionModeGenerations.current.set(item.id, (connectionModeGenerations.current.get(item.id) || 0) + 1)
+      setConnections(current => current.map(connection => connection.id === item.id ? result.connection : connection))
+      if (result.connected) {
         const targetIds = new Set(targetTabs.map(tab => tab.id))
+        for (const tab of targetTabs) tableRequestIds.current.set(tab.id, (tableRequestIds.current.get(tab.id) || 0) + 1)
         setPending(current => { const next = { ...current }; targetIds.forEach(id => delete next[id]); return next })
         setResults(current => { const next = { ...current }; targetIds.forEach(id => delete next[id]); return next })
         setStructures(current => { const next = { ...current }; targetTabs.filter(tab => tab.kind === 'structure').forEach(tab => delete next[tab.id]); return next })
-        if (result.connected) {
-          await Promise.all(targetTabs.map(async tab => {
-            try {
-              if (tab.kind === 'table' && tab.table) {
-                const view = tableViews[tab.id] ?? DEFAULT_TABLE_VIEW
-                const refreshed = await window.sqlConnect.db.query(item.id, tab.table, { offset: view.page * 100, limit: 100, filter: view.filter || undefined, orderBy: view.sort.column, direction: view.sort.direction, database: tab.database })
-                setResults(current => tabsRef.current.some(currentTab => currentTab.id === tab.id) ? { ...current, [tab.id]: refreshed } : current)
-              } else if (tab.kind === 'structure' && tab.table) {
-                const structure = await window.sqlConnect.db.structure(item.id, tab.table, tab.database)
-                setStructures(current => tabsRef.current.some(currentTab => currentTab.id === tab.id) ? { ...current, [tab.id]: structure } : current)
-              }
-            } catch (error) { notify(`模式已切换，数据刷新失败：${errorText(error)}`, 'error') }
-          }))
-        }
-        notify(`已切换为${targetReadonly ? '只读' : '读写'}模式`, 'success')
-      } catch (error) { notify(errorText(error), 'error') }
-      finally { readonlySwitchingRef.current.delete(item.id); setReadonlySwitching(v => v.filter(id => id !== item.id)) }
-      return
-    }
-    const next = { ...item, readonly: !item.readonly }
-    const wasConnected = connected.includes(item.id)
-    if (wasConnected) {
-      const ok = await disconnect(item.id)
-      if (!ok) return
-    }
-    const saved = await persist(connections.map(connection => connection.id === item.id ? next : connection))
-    if (saved && wasConnected && !disconnectingRef.current.has(item.id)) await connect(next)
+        const refreshErrors: string[] = []
+        await Promise.all(targetTabs.map(async tab => {
+          try {
+            if (tab.kind === 'table' && tab.table) {
+              const view = tableViews[tab.id] ?? DEFAULT_TABLE_VIEW
+              const refreshed = await window.sqlConnect.db.query(item.id, tab.table, { offset: view.page * 100, limit: 100, filter: view.filter || undefined, orderBy: view.sort.column, direction: view.sort.direction, database: tab.database })
+              setResults(current => tabsRef.current.some(currentTab => currentTab.id === tab.id) ? { ...current, [tab.id]: refreshed } : current)
+            } else if (tab.kind === 'structure' && tab.table) {
+              const structure = await window.sqlConnect.db.structure(item.id, tab.table, tab.database)
+              setStructures(current => tabsRef.current.some(currentTab => currentTab.id === tab.id) ? { ...current, [tab.id]: structure } : current)
+            }
+          } catch (error) { refreshErrors.push(errorText(error)) }
+        }))
+        try {
+          if (item.type === 'sqlite') {
+            const items = await window.sqlConnect.db.schema(item.id)
+            setSchema(current => ({ ...current, [item.id]: items }))
+          } else {
+            const databases = [...new Set([...(mysqlDatabases[item.id] || []), ...targetTabs.map(tab => tab.database).filter((name): name is string => !!name)])]
+            await Promise.all(databases.map(async database => {
+              const items = await window.sqlConnect.db.schema(item.id, database)
+              setSchema(current => ({ ...current, [`${item.id}|${database}`]: items }))
+            }))
+          }
+        } catch (error) { refreshErrors.push(errorText(error)) }
+        if (refreshErrors.length) notify(`模式已切换，数据刷新失败：${refreshErrors[0]}`, 'error')
+        else notify(`已切换为${targetReadonly ? '只读' : '读写'}模式`, 'success')
+      } else notify(`已切换为${targetReadonly ? '只读' : '读写'}模式`, 'success')
+    } catch (error) { notify(errorText(error), 'error') }
+    finally { readonlySwitchingRef.current.delete(item.id); setReadonlySwitching(v => v.filter(id => id !== item.id)) }
   }
   async function openTable(connectionId: string, item: TableInfo, kind: Tab['kind'] = 'table', database?: string) {
     if (readonlySwitchingRef.current.has(connectionId)) return
+    const generation = connectionModeGenerations.current.get(connectionId) || 0
     const id = `${connectionId}:${database || ''}:${kind}:${item.name}`; const nextTab: Tab = { id, kind, title: item.name, table: item.name, connectionId, database }; const existed = tabsRef.current.some(t => t.id === id); if (existed && (pending[id] || []).length && !committingTabsRef.current.has(id) && !window.confirm(`标签“${item.name}”有未提交修改。重新读取会放弃这些修改，继续吗？`)) return; if (committingTabsRef.current.has(id)) return; if (existed && (pending[id] || []).length) setPending(v => ({ ...v, [id]: [] })); setTabs(v => { const next = existed ? v : [...v, nextTab]; tabsRef.current = next; return next }); setActiveTab(id); setTabRevealRequest(v => v + 1)
-    if (kind === 'structure') { if (!structures[id]) setStructures(v => ({ ...v, [id]: undefined as never })); try { const structure = await window.sqlConnect.db.structure(connectionId, item.name, database); if (tabsRef.current.some(t => t.id === id)) setStructures(v => ({ ...v, [id]: structure })) } catch (error) { notify(error instanceof Error ? error.message : String(error), 'error') } }
+    if (kind === 'structure') { if (!structures[id]) setStructures(v => ({ ...v, [id]: undefined as never })); try { const structure = await window.sqlConnect.db.structure(connectionId, item.name, database); if (generation === (connectionModeGenerations.current.get(connectionId) || 0) && tabsRef.current.some(t => t.id === id)) setStructures(v => ({ ...v, [id]: structure })) } catch (error) { if (generation === (connectionModeGenerations.current.get(connectionId) || 0)) notify(error instanceof Error ? error.message : String(error), 'error') } }
     else { const view = tableViews[id] ?? DEFAULT_TABLE_VIEW; if (!existed) setTableViews(v => ({ ...v, [id]: DEFAULT_TABLE_VIEW })); await refreshTable({ tabId: id, connectionId, table: item.name, database }, { offset: view.page * 100, filter: view.filter, orderBy: view.sort.column, direction: view.sort.direction }) }
   }
   async function refreshTable(context: TableContext, options: { offset?: number; filter?: string; orderBy?: string; direction?: 'asc' | 'desc'; view?: TableViewState } = {}) {
+    const generation = connectionModeGenerations.current.get(context.connectionId) || 0
     const requestId = (tableRequestIds.current.get(context.tabId) || 0) + 1
     tableRequestIds.current.set(context.tabId, requestId)
     setLoading(true)
     try {
       const view = options.view ?? tableViews[context.tabId] ?? DEFAULT_TABLE_VIEW
       const data = await window.sqlConnect.db.query(context.connectionId, context.table, { offset: options.offset ?? view.page * 100, limit: 100, orderBy: 'orderBy' in options ? options.orderBy : view.sort.column, direction: 'direction' in options ? options.direction : view.sort.direction, filter: 'filter' in options ? options.filter : view.filter, database: context.database })
-      if (tableRequestIds.current.get(context.tabId) !== requestId || !tabsRef.current.some(t => t.id === context.tabId)) return false
+      if (generation !== (connectionModeGenerations.current.get(context.connectionId) || 0) || tableRequestIds.current.get(context.tabId) !== requestId || !tabsRef.current.some(t => t.id === context.tabId)) return false
       setResults(v => ({ ...v, [context.tabId]: data }))
       if (options.view) setTableViews(v => ({ ...v, [context.tabId]: options.view! }))
       return true
-    } catch (error) { if (tableRequestIds.current.get(context.tabId) === requestId) notify(errorText(error), 'error'); return false }
+    } catch (error) { if (generation === (connectionModeGenerations.current.get(context.connectionId) || 0) && tableRequestIds.current.get(context.tabId) === requestId) notify(errorText(error), 'error'); return false }
     finally { if (tableRequestIds.current.get(context.tabId) === requestId) setLoading(false) }
   }
   function tableContext(tabId: string): TableContext | undefined { const tab = tabsRef.current.find(item => item.id === tabId); return tab?.table ? { tabId, connectionId: tab.connectionId, table: tab.table, database: tab.database } : undefined }
@@ -443,7 +454,7 @@ function App() {
     const context = tableContext(tabId)
     if (context) await refreshTable(context, { offset: 0, filter: filterValue, view })
   }
-  async function runSql(sqlOverride?: string) { const text = (sqlOverride ?? sqlText).trim(); if (!text || !activeConnection || loading || sqlExecutingRef.current || readonlySwitchingRef.current.has(activeConnection)) return; sqlExecutingRef.current = true; const id = `${activeConnection}:${activeDatabase || ''}:query:${uid()}`; const title = text.split(/\s+/).slice(0, 4).join(' '); const queryTab: Tab = { id, kind: 'query', title, sql: text, connectionId: activeConnection, database: activeDatabase || undefined }; setTabs(v => { const next = [...v, queryTab]; tabsRef.current = next; return next }); setSqlByTab(v => ({ ...v, [id]: text })); setActiveTab(id); setLoading(true); try { const data = await window.sqlConnect.db.execute(activeConnection, text, id, activeDatabase || undefined); if (tabsRef.current.some(t => t.id === id)) setResults(v => ({ ...v, [id]: data })); notify(data.changes !== undefined ? `执行成功，影响 ${data.changes} 行` : `查询完成，用时 ${data.elapsedMs} ms`, 'success') } catch (error) { notify(error instanceof Error ? error.message : String(error), 'error') } finally { sqlExecutingRef.current = false; setLoading(false) } }
+  async function runSql(sqlOverride?: string) { const text = (sqlOverride ?? sqlText).trim(); if (!text || !activeConnection || loading || sqlExecutingRef.current || readonlySwitchingRef.current.has(activeConnection)) return; const generation = connectionModeGenerations.current.get(activeConnection) || 0; sqlExecutingRef.current = true; const id = `${activeConnection}:${activeDatabase || ''}:query:${uid()}`; const title = text.split(/\s+/).slice(0, 4).join(' '); const queryTab: Tab = { id, kind: 'query', title, sql: text, connectionId: activeConnection, database: activeDatabase || undefined }; setTabs(v => { const next = [...v, queryTab]; tabsRef.current = next; return next }); setSqlByTab(v => ({ ...v, [id]: text })); setActiveTab(id); setLoading(true); try { const data = await window.sqlConnect.db.execute(activeConnection, text, id, activeDatabase || undefined); if (generation === (connectionModeGenerations.current.get(activeConnection) || 0) && tabsRef.current.some(t => t.id === id)) { setResults(v => ({ ...v, [id]: data })); notify(data.changes !== undefined ? `执行成功，影响 ${data.changes} 行` : `查询完成，用时 ${data.elapsedMs} ms`, 'success') } } catch (error) { if (generation === (connectionModeGenerations.current.get(activeConnection) || 0)) notify(error instanceof Error ? error.message : String(error), 'error') } finally { sqlExecutingRef.current = false; setLoading(false) } }
   function rowKey(row: Record<string, unknown>) { if (row.__sqlconnect_new_rowid !== undefined) return `new:${row.__sqlconnect_new_rowid}`; if (row.__sqlconnect_identity) return `mysql:${JSON.stringify(row.__sqlconnect_identity)}`; return `sqlite:${String(row.__sqlconnect_rowid ?? JSON.stringify(row))}` }
   function updateCell(tabId: string, row: Record<string, unknown>, column: string, value: unknown, mode: 'value' | 'null' | 'default' = 'value') { if (committingTabsRef.current.has(tabId)) return; const tab = tabsRef.current.find(t => t.id === tabId); if (!tab?.table || readonlySwitchingRef.current.has(tab.connectionId)) return; const key = rowKey(row); setResults(v => ({ ...v, [tabId]: { ...v[tabId], rows: v[tabId].rows.map(r => rowKey(r) === key ? { ...r, [column]: mode === 'default' || mode === 'null' ? null : value } : r) } })); setPending(v => { const current = v[tabId] || []; const isNew = row.__sqlconnect_new_rowid !== undefined; const index = current.findIndex(change => isNew ? change.type === 'insert' && change.rowid === row.__sqlconnect_new_rowid : change.type === 'update' && (row.__sqlconnect_identity ? JSON.stringify(change.identity) === JSON.stringify(row.__sqlconnect_identity) : String(change.rowid) === String(row.__sqlconnect_rowid))); if (isNew) { const change = current[index]; const values = { ...(change?.values || {}) }; const defaults = new Set(change?.defaults || []); if (mode === 'default') { delete values[column]; defaults.add(column) } else { defaults.delete(column); values[column] = mode === 'null' ? null : value }; const next = [...current]; next[index] = { ...change, values, defaults: [...defaults] }; return { ...v, [tabId]: next } } const change = index >= 0 ? current[index] : { type: 'update' as const, table: tab.table!, rowid: row.__sqlconnect_rowid as number | string, identity: row.__sqlconnect_identity as Record<string, unknown> | undefined, snapshot: row.__sqlconnect_snapshot as string | undefined, values: {}, original: {} }; const values = { ...change.values }; const original = { ...(change.original || {}) }; const defaults = new Set(change.defaults || []); if (mode === 'default') { delete values[column]; defaults.add(column) } else { defaults.delete(column); values[column] = mode === 'null' ? null : value; if (!Object.hasOwn(original, column)) original[column] = row[column] }; const nextChange = { ...change, values, defaults: [...defaults], original }; const next = [...current]; if (index >= 0) next[index] = nextChange; else next.push(nextChange); return { ...v, [tabId]: next } }) }
   function addRow(tabId: string) { if (committingTabsRef.current.has(tabId)) return; const tab = tabsRef.current.find(t => t.id === tabId); const result = results[tabId]; if (!tab?.table || !result || readonlySwitchingRef.current.has(tab.connectionId)) return; const newRowId = uid(); const row = { ...Object.fromEntries(result.columns.filter(c => !c.startsWith('__sqlconnect_')).map(c => [c, null])), __sqlconnect_new_rowid: newRowId }; const values = result.editable ? {} : Object.fromEntries(result.columns.filter(c => c !== '__sqlconnect_rowid').map(c => [c, null])); setResults(v => ({ ...v, [tabId]: { ...v[tabId], rows: [...v[tabId].rows, row] } })); setPending(v => ({ ...v, [tabId]: [...(v[tabId] || []), { type: 'insert', table: tab.table!, rowid: newRowId, values }] })) }
@@ -492,7 +503,7 @@ function App() {
   }
   const result = activeTab ? results[activeTab] : undefined
   const activeChanges = activeTab ? pending[activeTab] || [] : []
-  const newQuery = () => { const connectionId = connected[0]; if (!connectionId) { notify('请先连接数据库', 'info'); return } const database = selectedDatabase[connectionId]; const id = `${connectionId}:${database || ''}:query:${uid()}`; const tab: Tab = { id, kind: 'query', title: 'SQL 查询', sql: '', connectionId, database }; setTabs(v => { const next = [...v, tab]; tabsRef.current = next; return next }); setSqlByTab(v => ({ ...v, [id]: '' })); setActiveTab(id); setSqlText('') }
+  const newQuery = () => { const connectionId = [active?.connectionId, ...connected].find(id => !!id && connected.includes(id) && !readonlySwitchingRef.current.has(id)); if (!connectionId) { notify(connected.length ? '连接模式正在切换，请稍后再试' : '请先连接数据库', 'info'); return } const database = active?.connectionId === connectionId ? active.database || selectedDatabase[connectionId] : selectedDatabase[connectionId]; const id = `${connectionId}:${database || ''}:query:${uid()}`; const tab: Tab = { id, kind: 'query', title: 'SQL 查询', sql: '', connectionId, database }; setTabs(v => { const next = [...v, tab]; tabsRef.current = next; return next }); setSqlByTab(v => ({ ...v, [id]: '' })); setActiveTab(id); setSqlText('') }
   const handleSqlChange = (value: string) => { setSqlText(value); if (activeTab) setSqlByTab(v => ({ ...v, [activeTab]: value })) }
   const closeConnectionMenu = () => { setConnectionMenuOpen(false); setConnectionSubmenuOpen(false) }
   const openSQLiteSubmenu = () => setConnectionSubmenuOpen(true)
@@ -553,9 +564,9 @@ function App() {
         </div>
       </aside>
       <main className="workspace">
-        <div className="tabbar" ref={tabbarRef}>{tabs.length === 0 && <div className="tabbar-placeholder">选择一个表，或打开 SQL 查询</div>}{tabs.map(tab => <button className={`tab ${tab.id === activeTab ? 'active' : ''}`} key={tab.id} onClick={() => { setActiveTab(tab.id); setTabRevealRequest(v => v + 1); if (tab.kind === 'query') setSqlText(sqlByTab[tab.id] ?? tab.sql ?? '') }} onContextMenu={event => openTabContextMenu(event, tab.id)}><span className="tab-dot">{tab.kind === 'query' ? <Zap size={12}/> : tab.kind === 'structure' ? <Settings2 size={12}/> : <Table2 size={12}/>}</span><span>{tab.title}</span><X size={13} onClick={(event) => { event.stopPropagation(); closeTab(tab.id) }}/></button>)}<button className="new-query" onClick={newQuery}><Plus size={15}/>SQL</button></div>
-        <div className="content-area">{active?.kind === 'structure' && <StructureView structure={structures[active.id]} readonly={activeMySQLReadonly} />}{active?.kind === 'table' && result && <DataView tab={active} result={result} isMySQL={activeConnectionConfig?.type === 'mysql'} readonly={activeConnectionConfig?.type === 'mysql' ? activeMySQLReadonly || !result.editable : !!activeConnectionConfig?.readonly} editReason={activeMySQLReadonly ? '连接处于只读模式' : result.editReason} busy={committingTabs.includes(active.id) || readonlySwitchingRef.current.has(active.connectionId)} view={tableViews[active.id] ?? DEFAULT_TABLE_VIEW} setFilter={(value: string) => setTableViews(v => ({ ...v, [active.id]: { ...(v[active.id] ?? DEFAULT_TABLE_VIEW), filter: value } }))} onSearch={(value: string) => void searchTable(active.id, value)} onPage={(value: number) => void setTablePage(active.id, value)} sortTable={(column: string) => void sortTable(active.id, column)} widths={columnWidths} setColumnWidth={setColumnWidth} onRefresh={() => { if (canReloadTable(active.id)) void refreshTable({ tabId: active.id, connectionId: active.connectionId, table: active.table!, database: active.database }) }} onEdit={updateCell} onAdd={() => addRow(active.id)} onDelete={deleteRow} changes={activeChanges} onCommit={() => void commit(active.id)} onDiscard={() => discard(active.id)} />}{active?.kind === 'query' && <QueryView tabId={active.id} widths={columnWidths} setColumnWidth={setColumnWidth} sql={sqlText} setSql={handleSqlChange} onRun={runSql} loading={loading || readonlySwitchingRef.current.has(active.connectionId)} result={result} database={activeDatabase} databases={mysqlDatabases[activeConnection] || []} dialect={activeConnectionConfig?.type === 'mysql' ? 'mysql' : 'sqlite'} readonly={activeMySQLReadonly} setDatabase={database => { setSelectedDatabase(v => ({ ...v, [activeConnection]: database })); setTabs(v => v.map(t => t.id === active.id ? { ...t, database } : t)) }} />}</div>
-        <footer className="statusbar"><span><span className={`status-dot ${loading ? 'busy' : ''}`}></span>{loading ? '正在执行…' : activeConnection ? '已就绪' : '未连接数据库'}</span>{activeConnection && <span className="status-path">{activeConnectionConfig?.type === 'mysql' ? `${activeConnectionConfig.host}:${activeConnectionConfig.port}` : (activeConnectionConfig as any)?.path}</span>}{activeConnectionConfig?.type === 'mysql' && <span className="mode-indicator">{activeMySQLReadonly ? <><Lock size={11}/>只读模式</> : '读写模式'}</span>}<span className="status-spacer"/><span>UTF-8</span><span>SQL Connect 1.3</span></footer>
+        <div className="tabbar" ref={tabbarRef}>{tabs.length === 0 && <div className="tabbar-placeholder">选择一个表，或打开 SQL 查询</div>}{tabs.map(tab => <button className={`tab ${tab.id === activeTab ? 'active' : ''}`} key={tab.id} data-tab-id={tab.id} data-tab-kind={tab.kind} onClick={() => { setActiveTab(tab.id); setTabRevealRequest(v => v + 1); if (tab.kind === 'query') setSqlText(sqlByTab[tab.id] ?? tab.sql ?? '') }} onContextMenu={event => openTabContextMenu(event, tab.id)}><span className="tab-dot">{tab.kind === 'query' ? <Zap size={12}/> : tab.kind === 'structure' ? <Settings2 size={12}/> : <Table2 size={12}/>}</span><span>{tab.title}</span><X size={13} onClick={(event) => { event.stopPropagation(); closeTab(tab.id) }}/></button>)}<button className="new-query" onClick={newQuery}><Plus size={15}/>SQL</button></div>
+        <div className="content-area">{active?.kind === 'structure' && <StructureView structure={structures[active.id]} readonly={activeConnectionReadonly} busy={readonlySwitchingRef.current.has(active.connectionId)} onRefresh={() => { if (active.table && !readonlySwitchingRef.current.has(active.connectionId)) void window.sqlConnect.db.structure(active.connectionId, active.table, active.database).then(value => setStructures(current => tabsRef.current.some(tab => tab.id === active.id) ? { ...current, [active.id]: value } : current)).catch(error => notify(errorText(error), 'error')) }} />}{active?.kind === 'table' && result && <DataView tab={active} result={result} isMySQL={activeConnectionConfig?.type === 'mysql'} readonly={activeConnectionConfig?.type === 'mysql' ? activeConnectionReadonly || !result.editable : activeConnectionReadonly} editReason={activeConnectionReadonly ? '连接处于只读模式' : result.editReason} busy={committingTabs.includes(active.id) || readonlySwitchingRef.current.has(active.connectionId)} view={tableViews[active.id] ?? DEFAULT_TABLE_VIEW} setFilter={(value: string) => setTableViews(v => ({ ...v, [active.id]: { ...(v[active.id] ?? DEFAULT_TABLE_VIEW), filter: value } }))} onSearch={(value: string) => void searchTable(active.id, value)} onPage={(value: number) => void setTablePage(active.id, value)} sortTable={(column: string) => void sortTable(active.id, column)} widths={columnWidths} setColumnWidth={setColumnWidth} onRefresh={() => { if (canReloadTable(active.id)) void refreshTable({ tabId: active.id, connectionId: active.connectionId, table: active.table!, database: active.database }) }} onEdit={updateCell} onAdd={() => addRow(active.id)} onDelete={deleteRow} changes={activeChanges} onCommit={() => void commit(active.id)} onDiscard={() => discard(active.id)} />}{active?.kind === 'table' && !result && <div className="loading-state"><AlertCircle size={18}/>表数据尚未加载<button className="toolbar-btn" disabled={readonlySwitchingRef.current.has(active.connectionId)} onClick={() => { if (active.table) void refreshTable({ tabId: active.id, connectionId: active.connectionId, table: active.table, database: active.database }) }}>重新读取</button></div>}{active?.kind === 'query' && <QueryView tabId={active.id} widths={columnWidths} setColumnWidth={setColumnWidth} sql={sqlText} setSql={handleSqlChange} onRun={runSql} loading={loading || readonlySwitchingRef.current.has(active.connectionId)} editorDisabled={readonlySwitchingRef.current.has(active.connectionId)} result={result} database={activeDatabase} databases={mysqlDatabases[activeConnection] || []} dialect={activeConnectionConfig?.type === 'mysql' ? 'mysql' : 'sqlite'} readonly={activeMySQLReadonly} setDatabase={database => { if (readonlySwitchingRef.current.has(active.connectionId)) return; setSelectedDatabase(v => ({ ...v, [activeConnection]: database })); setTabs(v => v.map(t => t.id === active.id ? { ...t, database } : t)) }} />}</div>
+        <footer className="statusbar"><span><span className={`status-dot ${loading ? 'busy' : ''}`}></span>{loading ? '正在执行…' : activeConnection ? '已就绪' : '未连接数据库'}</span>{activeConnection && <span className="status-path">{activeConnectionConfig?.type === 'mysql' ? `${activeConnectionConfig.host}:${activeConnectionConfig.port}` : (activeConnectionConfig as any)?.path}</span>}{activeConnectionConfig && <span className="mode-indicator">{activeConnectionReadonly ? <><Lock size={11}/>只读模式</> : '读写模式'}</span>}<span className="status-spacer"/><span>UTF-8</span><span>SQL Connect 1.3</span></footer>
       </main>
     </div>
     {contextMenu && <div className="tab-context-menu" style={{ left: contextMenu.x, top: contextMenu.y }} onMouseDown={event => event.stopPropagation()} onContextMenu={event => event.preventDefault()}><button disabled={!contextIds('left').length} onClick={() => closeTabs(contextIds('left'), contextMenu.tabId)}>关闭左侧窗口</button><button disabled={!contextIds('right').length} onClick={() => closeTabs(contextIds('right'), contextMenu.tabId)}>关闭右侧窗口</button><button disabled={!contextIds('others').length} onClick={() => closeTabs(contextIds('others'), contextMenu.tabId)}>关闭其他窗口</button></div>}
@@ -596,9 +607,9 @@ function DataView({ tab, result, isMySQL, readonly, editReason, busy, view, setF
 }
 function setColumnWidthForView(setColumnWidth: (tabId: string, column: string, width: number) => void, tabId: string) { return (column: string, width: number) => setColumnWidth(tabId, column, width) }
 
-function StructureView({ structure, readonly }: { structure?: Structure; readonly?: boolean }) { if (!structure) return <div className="loading-state"><Activity className="spin"/>正在读取结构…</div>; const editable = structure.editable && !readonly; return <div className="panel structure-panel"><div className="panel-head"><div><div className="eyebrow">SCHEMA</div><h1>表结构</h1>{readonly && <div className="edit-reason" role="note">连接处于只读模式</div>}</div><span className={`badge ${editable ? 'green' : 'gray'}`}>{editable ? '可编辑' : '只读'}</span></div><h3>字段</h3><div className="structure-table"><table><thead><tr><th>名称</th><th>类型</th><th>非空</th><th>默认值</th><th>主键</th></tr></thead><tbody>{structure.columns.map(c => <tr key={c.name}><td className="mono">{c.name}</td><td>{c.type || '—'}</td><td>{c.notnull ? '是' : '否'}</td><td className="mono">{c.dflt_value || '—'}</td><td>{c.pk ? <span className="key-pill">PK {c.pk}</span> : '—'}</td></tr>)}</tbody></table></div><h3>建表 SQL</h3><pre className="sql-preview">{structure.sql || '没有可用的建表 SQL'}</pre>{structure.indexes.length > 0 && <><h3>索引</h3><div className="index-list">{structure.indexes.map((i: any) => <span key={i.name} className="index-pill">{i.name}</span>)}</div></>}</div> }
+function StructureView({ structure, readonly, busy, onRefresh }: { structure?: Structure; readonly?: boolean; busy?: boolean; onRefresh: () => void }) { if (!structure) return <div className="loading-state"><Activity className="spin"/>正在读取结构…<button className="toolbar-btn" disabled={busy} onClick={onRefresh}>重新读取</button></div>; const editable = structure.editable && !readonly; return <div className="panel structure-panel"><div className="panel-head"><div><div className="eyebrow">SCHEMA</div><h1>表结构</h1>{readonly && <div className="edit-reason" role="note">连接处于只读模式</div>}</div><span className={`badge ${editable ? 'green' : 'gray'}`}>{editable ? '可编辑' : '只读'}</span></div><h3>字段</h3><div className="structure-table"><table><thead><tr><th>名称</th><th>类型</th><th>非空</th><th>默认值</th><th>主键</th></tr></thead><tbody>{structure.columns.map(c => <tr key={c.name}><td className="mono">{c.name}</td><td>{c.type || '—'}</td><td>{c.notnull ? '是' : '否'}</td><td className="mono">{c.dflt_value || '—'}</td><td>{c.pk ? <span className="key-pill">PK {c.pk}</span> : '—'}</td></tr>)}</tbody></table></div><h3>建表 SQL</h3><pre className="sql-preview">{structure.sql || '没有可用的建表 SQL'}</pre>{structure.indexes.length > 0 && <><h3>索引</h3><div className="index-list">{structure.indexes.map((i: any) => <span key={i.name} className="index-pill">{i.name}</span>)}</div></>}</div> }
 
-function QueryView({ tabId, widths, setColumnWidth, sql, setSql, onRun, loading, result, database, databases, dialect, readonly, setDatabase }: { tabId: string; widths: Record<string, number>; setColumnWidth: (tabId: string, column: string, width: number) => void; sql: string; setSql: (value: string) => void; onRun: (sql?: string) => void; loading: boolean; result?: QueryResult; database?: string; databases: string[]; dialect: 'sqlite' | 'mysql'; readonly: boolean; setDatabase: (database: string) => void }) {
+function QueryView({ tabId, widths, setColumnWidth, sql, setSql, onRun, loading, editorDisabled, result, database, databases, dialect, readonly, setDatabase }: { tabId: string; widths: Record<string, number>; setColumnWidth: (tabId: string, column: string, width: number) => void; sql: string; setSql: (value: string) => void; onRun: (sql?: string) => void; loading: boolean; editorDisabled: boolean; result?: QueryResult; database?: string; databases: string[]; dialect: 'sqlite' | 'mysql'; readonly: boolean; setDatabase: (database: string) => void }) {
   const extensions = useMemo(() => [sqlLanguage({ dialect: dialect === 'mysql' ? MySQL : SQLite, upperCaseKeywords: true }), autocompletion({ interactionDelay: 0 }), Prec.highest(keymap.of([{ key: 'Tab', run: (view: EditorView) => acceptCompletion(view) || indentWithTab.run?.(view) || false }, { key: 'Mod-Enter', run: (view: EditorView) => { onRun(view.state.doc.toString()); return true } }]))], [dialect, onRun])
   const columns = result?.columns || []
   const gridWidth = columns.reduce((sum, column) => sum + (widths[columnWidthKey(tabId, column)] ?? measureColumnWidth(column, false)), 0)
@@ -606,10 +617,10 @@ function QueryView({ tabId, widths, setColumnWidth, sql, setSql, onRun, loading,
   return (
     <div className="query-panel">
       <div className="query-head">
-        <div><div className="eyebrow">SQL EDITOR</div><h1>查询工作区</h1>{readonly && <div className="edit-reason" role="note">只读模式：仅允许 SELECT、WITH 查询、SHOW、DESCRIBE 和普通 EXPLAIN</div>}{databases.length > 0 && <label className="database-picker">数据库 <select value={database || ''} onChange={event => setDatabase(event.target.value)}><option value="">选择数据库</option>{databases.map(name => <option key={name} value={name}>{name}</option>)}</select></label>}</div>
+        <div><div className="eyebrow">SQL EDITOR</div><h1>查询工作区</h1>{readonly && <div className="edit-reason" role="note">只读模式：仅允许 SELECT、WITH 查询、SHOW、DESCRIBE 和普通 EXPLAIN</div>}{databases.length > 0 && <label className="database-picker">数据库 <select disabled={editorDisabled} value={database || ''} onChange={event => setDatabase(event.target.value)}><option value="">选择数据库</option>{databases.map(name => <option key={name} value={name}>{name}</option>)}</select></label>}</div>
         <button className="run-btn" onClick={() => onRun(sql)} disabled={loading}><Play size={15} fill="currentColor"/>{loading ? '执行中…' : '执行'} <kbd>⌘ Enter</kbd></button>
       </div>
-      <div className="editor-wrap"><CodeMirror value={sql} height="220px" theme={oneDark} extensions={extensions} onChange={setSql} indentWithTab={false} basicSetup={{ lineNumbers: true, foldGutter: true, autocompletion: false}}/></div>
+      <div className="editor-wrap"><CodeMirror value={sql} height="220px" theme={oneDark} extensions={extensions} onChange={setSql} editable={!editorDisabled} indentWithTab={false} basicSetup={{ lineNumbers: true, foldGutter: true, autocompletion: false}}/></div>
       <div className="result-head">
         <div><span className="eyebrow">RESULT</span>{result && <span className="result-meta">{result.changes !== undefined ? `${result.changes} 行受影响 · ${result.elapsedMs} ms` : `${result.rows.length} 行 · ${result.elapsedMs} ms${result.truncated ? ' · 已截断' : ''}`}</span>}</div>
         {loading && <button className="stop-btn"><Square size={13} fill="currentColor"/>停止</button>}
