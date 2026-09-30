@@ -1,11 +1,11 @@
 # SQL Connect 项目开发约定与踩坑记录
 
-更新日期：2026-09-27。本文适用于本项目；依赖版本、功能状态和验证结果变化后应同步更新。以实际代码和测试为准，不把最初计划或历史交付说明当作已完成功能清单。
+更新日期：2026-09-30。本文适用于本项目；依赖版本、功能状态和验证结果变化后应同步更新。以实际代码和测试为准，不把最初计划或历史交付说明当作已完成功能清单。
 
 ## 项目与执行环境
 
 - 产品：SQL Connect，类似 Navicat 的桌面数据库客户端，支持普通本地 SQLite 文件和 TCP/TLS MySQL 连接。
-- 当前应用版本：1.1.0（界面状态栏显示 1.1）。
+- 当前应用版本：1.2.1（界面状态栏显示 1.2）。
 - 项目源目录：`/Users/wuqiang/Projects/SQL-Connect`。在当前 Mac 本地安装依赖、运行测试和打包，不自动切换到 WSL。
 - 当前目标平台：Apple Silicon macOS（arm64）。Windows、SQLCipher、远程数据库不属于首版已验证范围。
 - 使用 npm，维护 `package.json` 与 `package-lock.json`；不要随意混用包管理器或删除锁文件。
@@ -153,7 +153,7 @@ process.on('message', request => handle(request))
 
 ## 功能状态与后续修改原则
 
-- 当前已验证 SQLite 连接/新建及错误恢复，以及隔离临时 MySQL 8.4 实例的连接、多数据库浏览、结构读取、分页筛选、独立 SQL 会话和 BrowserWindow 首次点击表；MySQL 表格直接编辑、SSH 隧道和客户端证书认证仍未实现。
+- 当前已验证 SQLite 连接/新建及错误恢复，以及隔离临时 MySQL 8.4 实例的连接、多数据库浏览、结构读取、分页筛选、独立 SQL 会话和 InnoDB 表数据编辑；SSH 隧道和客户端证书认证仍未实现。
 - 连接配置按 SQLite 规范化文件路径或 MySQL 主机/端口/用户/TLS/CA 身份去重；历史重复配置启动时合并，SQLite 重复项任一只读时保留只读。
 - 当前表格写入依赖 rowid；复合主键、WITHOUT ROWID 表、生成列、BLOB 和大整数的完整编辑支持不能仅凭现有共享类型或界面推断。
 - 显式事务状态展示、停止按钮到取消 API 的完整联动、SQL 选区执行、字段级筛选等，后续开发前应检查实现与测试，不沿用早期交付描述作为完成证据。SQL 编辑器当前支持关键字 Tab 补全和 ⌘ Enter 执行全文，仍不支持选区执行。
@@ -212,9 +212,34 @@ process.on('message', request => handle(request))
 - 数据表筛选框只保留一个可点击的放大镜按钮，按 Enter 或点击按钮都会应用筛选。
 - `tests/app-electron.cjs` 覆盖 SQLite 排序、分页、筛选与排序组合、单个搜索图标及 Enter/点击筛选、未提交修改确认、数据和 SQL 结果的紧凑列宽/直接裁切/标题提示/排序图标间距/竖向分隔线/拖动与标签切换；`tests/app-mysql-electron.cjs` 使用隔离 MySQL 8.4 覆盖相同表头裁切和图标定位、即时排序、列宽拖动及状态栏版本显示。
 
+### SQLite 新增行暂存（已修复，1.1.0）
+
+- 新增行有独立的界面临时标识；单元格编辑会合并进对应 `insert` 的 `values`，不再只更新界面而将最初的 `NULL` 发送给数据库。多条新增行互不影响。
+- 删除尚未提交的新行会移除对应的待提交插入，不会生成缺少行标识的删除操作。提交失败保留输入，补全字段后可重试。
+- 临时标识只用于渲染和匹配待提交插入，不进入数据库字段值；无需修改 worker 或共享 API。未填写字段仍按现有行为显式提交为 `NULL`。
+- `tests/app-electron.cjs` 使用临时 SQLite 表验证多字段插入、多行独立值、撤销未提交行，以及 NOT NULL 错误后修正并重试。2026-09-27 验证：`npm run typecheck`、`npm run test:app`、`npm run dist:dir` 均通过。
+- 桌面 App 已从 `dist/mac-arm64/SQL Connect.app` 完整替换并启动；应用标识 `com.sqlconnect.app`、版本 `1.1.0` 与 `app.asar` SHA-256 已核对一致。旧版备份在 `dist/backups/Desktop-app.before-sqlite-insert-fix-20260927.app`。
+
 ### 侧栏表和视图行布局
 
 - SQLite 与 MySQL 共用表行样式：表图标固定为 16px，不显示 `TABLE/VIEW` 类型文字，表名区域可收缩并省略，结构按钮固定在右侧。
 - 连接详情与数据库子列表缩进已收紧，同时保留层级线；表名完整内容及表/视图类型通过悬停提示和无障碍名称提供。
 - 测试在窄侧栏中测量长表名、视图的图标尺寸和各列边界，并检查主题切换后的尺寸。
 - `tests/app-electron.cjs` 和 `tests/app-mysql-electron.cjs` 分别使用真实 SQLite、隔离 MySQL BrowserWindow 覆盖此布局。
+- 表格删除操作列使用无省略号的紧凑单元格，垃圾桶按钮填满并居中显示，避免全局 `text-overflow` 在图标旁生成多余省略号。两种 BrowserWindow 表格回归均测量删除格溢出与按钮宽度。
+
+### MySQL InnoDB 表数据编辑（1.2.0）
+
+- MySQL 表数据页支持暂存单元格修改、新增、删除、主键修改、NULL 和默认值，再按标签提交或放弃；SQL 查询结果保持只读。只开放有主键的 InnoDB 表，视图、无主键表及不支持的主键类型只读；生成列、BIT、二进制及空间字段不可编辑。
+- 单列和复合主键均作为原始行定位信息保存，修改主键不会丢失当前行身份。同一行多字段修改会合并；提交前在独立连接的事务内锁定并读取整行，比较读取时的 SHA-256 快照，记录被删除或外部修改则拒绝整批写入。主键与字段由元数据校验，标识符转义、值参数绑定；写入使用严格 SQL 模式，失败整批回滚。
+- MySQL 新增行只提交明确填写的字段，未填写字段由服务端使用默认值/自增；单元格右键菜单可设为 NULL 或使用数据库默认值。清空文本输入表示空字符串。若 COMMIT 阶段连接中断、结果不确定，界面清除本地待提交队列并提示重新读取确认，避免重试重复插入。
+- 修改、排序、筛选、分页、刷新、重开、关闭、断开及删除连接均保留现有未提交修改确认；提交期间阻止目标标签修改、关闭和重复提交。成功提交后按原标签条件重载。
+- `tests/mysql-worker-electron.cjs` 使用隔离 MySQL 8.4 覆盖单列与复合主键、主键修改、精确 DECIMAL、默认值、NULL、无主键拒绝、外部修改冲突和整批回滚；`tests/app-mysql-electron.cjs` 覆盖 BrowserWindow 新增、默认值、普通编辑、NULL、生成列只读及 1.2 版本显示。
+- 2026-09-30 验证：`npm run typecheck`、`npm test`、`npm run test:electron`、`npm run test:mysql`、`npm run test:settings`、`npm run test:app`、`npm run test:app:mysql` 及 `dist/mac-arm64/SQL Connect.app/Contents/Resources/app.asar` 上两种界面测试均通过。
+- 桌面应用已从 `dist/mac-arm64/SQL Connect.app` 完整替换并启动；`com.sqlconnect.app`、版本 `1.2.0` 和 ASAR SHA-256 `2ae9f4281fdee71dc7b816e23d7f4def5ee5a2e9a31d30203d247bf37a2f8525` 已核对一致。替换前桌面连接均离线；旧版完整备份在 `dist/backups/Desktop-app.before-mysql-edit-20260930.app`。
+
+### 表格删除按钮省略号修正（1.2.1）
+
+- 删除操作列原先继承通用单元格的 `text-overflow: ellipsis`，40px 列宽下垃圾桶按钮与单元格内边距挤占可用空间，浏览器因此在图标旁渲染出额外的省略号。删除单元格现在明确裁切溢出文本并去除内边距，按钮在列内居中填充。
+- `tests/app-electron.cjs` 与 `tests/app-mysql-electron.cjs` 均检查删除格没有文本溢出且按钮不超出单元格。2026-09-30 验证：`npm run typecheck`、`git diff --check`、`npm run test:app`、`npm run test:app:mysql`、`npm run dist:dir`，以及以 `dist/mac-arm64/SQL Connect.app/Contents/Resources/app.asar` 为测试目标的两套界面测试均通过。
+- 新构建标识 `com.sqlconnect.app`、版本 `1.2.1`，ASAR SHA-256 为 `dee07dde336079d5f6c81c125d00c81e021dd41df281bafec23d06ec760b1bcf`。桌面应用已完整替换并启动，标识、版本及 ASAR 校验值一致；启动后窗口正常，保存的连接配置可见且均离线。旧版完整备份在 `dist/backups/Desktop-app.before-delete-ellipsis-fix-20260930.app`。

@@ -176,7 +176,7 @@ function registerIpc() {
   ipcMain.handle('db:query', (_event, id: string, table: string, options: any) => sendWorker(id, 'query', { connectionId: id, table, ...options }))
   ipcMain.handle('db:execute', (_event, id: string, sql: string, sessionId?: string, database?: string) => sendWorker(id, 'execute', { connectionId: id, sql, sessionId, database }))
   ipcMain.handle('db:closeSession', (_event, id: string, sessionId: string) => sendWorker(id, 'closeSession', { connectionId: id, sessionId }))
-  ipcMain.handle('db:apply', (_event, id: string, changes: PendingChange[]) => sendWorker(id, 'apply', { connectionId: id, changes }))
+  ipcMain.handle('db:apply', (_event, id: string, changes: PendingChange[], database?: string) => sendWorker(id, 'apply', { connectionId: id, changes, database }))
   ipcMain.handle('db:cancel', (_event, id: string) => { workers.get(id)?.close('操作已取消，连接已断开'); return true })
 }
 function createWindow() { win = new BrowserWindow({ width: 1440, height: 920, minWidth: 1050, minHeight: 700, title: 'SQL Connect', backgroundColor: '#101522', webPreferences: { preload: join(__dirname, '../preload/index.js'), contextIsolation: true, nodeIntegration: false, sandbox: true } }); if (process.env.ELECTRON_RENDERER_URL) win.loadURL(process.env.ELECTRON_RENDERER_URL); else win.loadFile(join(__dirname, '../renderer/index.html')) }

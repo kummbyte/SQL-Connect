@@ -1,10 +1,19 @@
 const Database = require('better-sqlite3')
 const mysql = require('mysql2/promise')
 const fs = require('node:fs')
+const crypto = require('node:crypto')
 
 const databases = new Map()
 const quoteSqlite = name => `"${String(name).replaceAll('"', '""')}"`
 const quoteMysql = name => `\`${String(name).replaceAll('`', '``')}\``
+const canonical = value => {
+  if (Buffer.isBuffer(value)) return { __buffer: value.toString('base64') }
+  if (value instanceof Date) return value.toISOString()
+  if (Array.isArray(value)) return value.map(canonical)
+  if (value && typeof value === 'object') return Object.fromEntries(Object.keys(value).sort().map(key => [key, canonical(value[key])]))
+  return value
+}
+const snapshotOf = row => crypto.createHash('sha256').update(JSON.stringify(canonical(row))).digest('hex')
 const send = message => process.parentPort ? process.parentPort.postMessage(message) : process.send(message)
 const onMessage = fn => process.parentPort ? process.parentPort.on('message', event => fn(event.data)) : process.on('message', fn)
 const jsonSafe = value => {
@@ -62,7 +71,7 @@ function sqliteHandle(db, type, payload) {
 }
 
 function mysqlOptions(payload) {
-  const options = { host: payload.host, port: Number(payload.port || 3306), user: payload.user, password: payload.password || '', database: payload.database || undefined, decimalNumbers: false, supportBigNumbers: true, bigNumberStrings: true, dateStrings: true, multipleStatements: false, connectTimeout: 15000 }
+  const options = { host: payload.host, port: Number(payload.port || 3306), user: payload.user, password: payload.password || '', database: payload.database || undefined, decimalNumbers: false, supportBigNumbers: true, bigNumberStrings: true, dateStrings: true, jsonStrings: true, multipleStatements: false, connectTimeout: 15000 }
   if (payload.tls !== false) { options.ssl = { rejectUnauthorized: true }; if (payload.caPath) options.ssl.ca = fs.readFileSync(payload.caPath) }
   return options
 }
@@ -71,12 +80,81 @@ async function mysqlHandle(connection, type, payload) {
   if (type === 'closeSession') { const session = connection.sessions.get(payload.sessionId); if (session) await session.end(); connection.sessions.delete(payload.sessionId); connection.sessionDatabases.delete(payload.sessionId); return true }
   const database = payload.database || connection.database
   const qualified = table => `${quoteMysql(database)}.${quoteMysql(table)}`
+  const tableMeta = async table => {
+    const [tables] = await connection.base.query('SELECT TABLE_TYPE AS tableType, ENGINE AS engine FROM information_schema.tables WHERE TABLE_SCHEMA=? AND TABLE_NAME=?', [database, table])
+    const [columns] = await connection.base.query('SELECT ORDINAL_POSITION AS cid, COLUMN_NAME AS name, COLUMN_TYPE AS type, DATA_TYPE AS dataType, IS_NULLABLE, COLUMN_DEFAULT, COLUMN_KEY, EXTRA, GENERATION_EXPRESSION FROM information_schema.columns WHERE TABLE_SCHEMA=? AND TABLE_NAME=? ORDER BY ORDINAL_POSITION', [database, table])
+    const primaryKey = columns.filter(column => column.COLUMN_KEY === 'PRI').map(column => column.name)
+    const unsupportedKey = columns.some(column => primaryKey.includes(column.name) && ['bit', 'binary', 'varbinary', 'tinyblob', 'blob', 'mediumblob', 'longblob', 'json', 'geometry', 'point', 'linestring', 'polygon', 'multipoint', 'multilinestring', 'multipolygon', 'geometrycollection', 'float', 'double', 'real'].includes(String(column.dataType).toLowerCase()))
+    const editable = tables[0]?.tableType === 'BASE TABLE' && String(tables[0]?.engine).toLowerCase() === 'innodb' && primaryKey.length > 0 && !unsupportedKey
+    const editReason = tables[0]?.tableType === 'VIEW' ? '视图不可直接编辑' : tables[0]?.tableType !== 'BASE TABLE' ? '对象不存在或不可编辑' : String(tables[0]?.engine).toLowerCase() !== 'innodb' ? '仅支持 InnoDB 表编辑' : primaryKey.length === 0 ? '表没有主键，无法安全定位记录' : unsupportedKey ? '主键类型不支持无损定位' : undefined
+    const columnEditability = Object.fromEntries(columns.map(column => [column.name, !column.GENERATION_EXPRESSION && !/\b(generated|virtual|stored)\b/i.test(column.EXTRA) && !['bit', 'binary', 'varbinary', 'tinyblob', 'blob', 'mediumblob', 'longblob', 'geometry', 'point', 'linestring', 'polygon', 'multipoint', 'multilinestring', 'multipolygon', 'geometrycollection'].includes(String(column.dataType).toLowerCase())]))
+    return { table: tables[0], columns, primaryKey, editable, editReason, columnEditability }
+  }
   if (type === 'schema') { if (!database) return []; const [rows] = await connection.base.query("SELECT TABLE_NAME AS name, TABLE_TYPE AS tableType FROM information_schema.tables WHERE TABLE_SCHEMA = ? ORDER BY TABLE_TYPE, TABLE_NAME", [database]); return rows.map(row => ({ name: row.name, type: row.tableType === 'VIEW' ? 'view' : 'table' })) }
   if (!database) throw new Error('请先选择一个数据库')
-  if (type === 'structure') { const [columns] = await connection.base.query("SELECT ORDINAL_POSITION AS cid, COLUMN_NAME AS name, COLUMN_TYPE AS type, IS_NULLABLE, COLUMN_DEFAULT, COLUMN_KEY FROM information_schema.columns WHERE TABLE_SCHEMA=? AND TABLE_NAME=? ORDER BY ORDINAL_POSITION", [database, payload.table]); const [indexes] = await connection.base.query("SELECT INDEX_NAME AS name, NON_UNIQUE AS nonUnique, COLUMN_NAME AS columnName, SEQ_IN_INDEX AS seq FROM information_schema.statistics WHERE TABLE_SCHEMA=? AND TABLE_NAME=? ORDER BY INDEX_NAME, SEQ_IN_INDEX", [database, payload.table]); const [foreignKeys] = await connection.base.query("SELECT CONSTRAINT_NAME AS name, COLUMN_NAME AS columnName, REFERENCED_TABLE_NAME AS referencedTable, REFERENCED_COLUMN_NAME AS referencedColumn FROM information_schema.key_column_usage WHERE TABLE_SCHEMA=? AND TABLE_NAME=? AND REFERENCED_TABLE_NAME IS NOT NULL", [database, payload.table]); const [created] = await connection.base.query(`SHOW CREATE TABLE ${qualified(payload.table)}`); const sql = created[0] ? (created[0]['Create Table'] || created[0]['Create View'] || null) : null; return { columns: columns.map(c => ({ cid: Number(c.cid), name: c.name, type: c.type, notnull: c.IS_NULLABLE === 'NO' ? 1 : 0, dflt_value: c.COLUMN_DEFAULT, pk: c.COLUMN_KEY === 'PRI' ? 1 : 0 })), indexes: indexes.map(jsonSafe), foreignKeys: foreignKeys.map(jsonSafe), sql, editable: false, identity: null } }
-  if (type === 'query') { const [columns] = await connection.base.query("SELECT COLUMN_NAME AS name FROM information_schema.columns WHERE TABLE_SCHEMA=? AND TABLE_NAME=? ORDER BY ORDINAL_POSITION", [database, payload.table]); if (!columns.length) throw new Error('对象不存在'); const allowed = new Set(columns.map(c => c.name)); const order = payload.orderBy && allowed.has(payload.orderBy) ? ` ORDER BY ${quoteMysql(payload.orderBy)} ${payload.direction === 'desc' ? 'DESC' : 'ASC'}` : ''; const where = payload.filter ? ` WHERE ${columns.map(c => `CAST(${quoteMysql(c.name)} AS CHAR) LIKE ?`).join(' OR ')}` : ''; const filterArgs = payload.filter ? columns.map(() => `%${payload.filter}%`) : []; const limit = Math.min(Math.max(Number(payload.limit || 100), 1), 1000); const offset = Math.max(Number(payload.offset || 0), 0); const [rows] = await connection.base.query(`SELECT * FROM ${qualified(payload.table)}${where}${order} LIMIT ${limit} OFFSET ${offset}`, filterArgs); const [countRows] = await connection.base.query(`SELECT COUNT(*) AS count FROM ${qualified(payload.table)}${where}`, filterArgs); return { columns: rows.length ? Object.keys(rows[0]) : columns.map(c => c.name), rows: rows.map(jsonSafe), total: Number(countRows[0]?.count || 0), elapsedMs: 0 } }
+  if (type === 'structure') { const meta = await tableMeta(payload.table); const { columns } = meta; const [indexes] = await connection.base.query("SELECT INDEX_NAME AS name, NON_UNIQUE AS nonUnique, COLUMN_NAME AS columnName, SEQ_IN_INDEX AS seq FROM information_schema.statistics WHERE TABLE_SCHEMA=? AND TABLE_NAME=? ORDER BY INDEX_NAME, SEQ_IN_INDEX", [database, payload.table]); const [foreignKeys] = await connection.base.query("SELECT CONSTRAINT_NAME AS name, COLUMN_NAME AS columnName, REFERENCED_TABLE_NAME AS referencedTable, REFERENCED_COLUMN_NAME AS referencedColumn FROM information_schema.key_column_usage WHERE TABLE_SCHEMA=? AND TABLE_NAME=? AND REFERENCED_TABLE_NAME IS NOT NULL", [database, payload.table]); const [created] = await connection.base.query(`SHOW CREATE TABLE ${qualified(payload.table)}`); const sql = created[0] ? (created[0]['Create Table'] || created[0]['Create View'] || null) : null; const editable = meta.editable && Object.values(meta.columnEditability).some(Boolean); return { columns: columns.map(c => ({ cid: Number(c.cid), name: c.name, type: c.type, notnull: c.IS_NULLABLE === 'NO' ? 1 : 0, dflt_value: c.COLUMN_DEFAULT, pk: c.COLUMN_KEY === 'PRI' ? 1 : 0 })), indexes: indexes.map(jsonSafe), foreignKeys: foreignKeys.map(jsonSafe), sql, editable, identity: meta.primaryKey.join(',') || null, editReason: editable ? undefined : meta.editReason || '没有可编辑字段' } }
+  if (type === 'query') { const meta = await tableMeta(payload.table); const columns = meta.columns; if (!columns.length) throw new Error('对象不存在'); const allowed = new Set(columns.map(c => c.name)); const order = payload.orderBy && allowed.has(payload.orderBy) ? ` ORDER BY ${quoteMysql(payload.orderBy)} ${payload.direction === 'desc' ? 'DESC' : 'ASC'}` : ''; const where = payload.filter ? ` WHERE ${columns.map(c => `CAST(${quoteMysql(c.name)} AS CHAR) LIKE ?`).join(' OR ')}` : ''; const filterArgs = payload.filter ? columns.map(() => `%${payload.filter}%`) : []; const limit = Math.min(Math.max(Number(payload.limit || 100), 1), 1000); const offset = Math.max(Number(payload.offset || 0), 0); const selectedColumns = columns.map(column => quoteMysql(column.name)).join(', '); const [rows] = await connection.base.query(`SELECT ${selectedColumns} FROM ${qualified(payload.table)}${where}${order} LIMIT ${limit} OFFSET ${offset}`, filterArgs); const [countRows] = await connection.base.query(`SELECT COUNT(*) AS count FROM ${qualified(payload.table)}${where}`, filterArgs); const decorated = rows.map(row => ({ ...jsonSafe(row), __sqlconnect_identity: Object.fromEntries(meta.primaryKey.map(key => [key, jsonSafe(row[key])])), __sqlconnect_snapshot: snapshotOf(row) })); const editable = meta.editable && Object.values(meta.columnEditability).some(Boolean); return { columns: rows.length ? Object.keys(rows[0]) : columns.map(c => c.name), rows: decorated, total: Number(countRows[0]?.count || 0), elapsedMs: 0, editable, editReason: editable ? undefined : meta.editReason || '没有可编辑字段', primaryKey: meta.primaryKey, columnEditability: meta.columnEditability } }
+  if (type === 'apply') return mysqlApply(connection, database, payload.changes, tableMeta)
   if (type === 'execute') { const trimmed = payload.sql.trim(); if (!trimmed) throw new Error('请输入 SQL'); if (splitStatements(trimmed) > 1) throw new Error('首版每次只执行一条 SQL，请拆分语句后重试'); const sessionKey = payload.sessionId || 'default'; let session = connection.sessions.get(sessionKey); if (!session) { session = await mysql.createConnection(mysqlOptions({ ...connection.payload, database: payload.database || connection.database })); connection.sessions.set(sessionKey, session); if (payload.database || connection.database) connection.sessionDatabases.set(sessionKey, payload.database || connection.database) } const targetDatabase = payload.database || connection.database; const currentDatabase = connection.sessionDatabases.get(sessionKey); if (targetDatabase && currentDatabase !== targetDatabase) { await session.query(`USE ${quoteMysql(targetDatabase)}`); connection.sessionDatabases.set(sessionKey, targetDatabase) }; const start = performance.now(); const [rows, fields] = await session.query(trimmed); if (/^\s*USE\s+/i.test(trimmed)) { const match = trimmed.match(/^\s*USE\s+`?([^`;\s]+)`?/i); if (match) connection.sessionDatabases.set(sessionKey, match[1]) }; if (Array.isArray(rows)) return { columns: fields?.map(f => f.name) || (rows.length ? Object.keys(rows[0]) : []), rows: rows.slice(0, 1000).map(jsonSafe), truncated: rows.length > 1000, elapsedMs: Math.round(performance.now() - start) }; return { columns: [], rows: [], changes: Number(rows.affectedRows || 0), lastInsertRowid: rows.insertId == null ? undefined : String(rows.insertId), elapsedMs: Math.round(performance.now() - start) } }
   throw new Error('未知操作')
+}
+
+async function mysqlApply(connection, database, changes, tableMeta) {
+  if (!Array.isArray(changes) || !changes.length) return { columns: [], rows: [], changes: 0, elapsedMs: 0 }
+  const session = await mysql.createConnection(mysqlOptions({ ...connection.payload, database }))
+  let committed = false
+  try {
+    const [modes] = await session.query('SELECT @@SESSION.sql_mode AS mode')
+    const sqlMode = new Set(String(modes[0]?.mode || '').split(',').filter(Boolean)); sqlMode.add('STRICT_ALL_TABLES')
+    await session.query('SET SESSION sql_mode=?', [[...sqlMode].join(',')])
+    await session.beginTransaction()
+    let count = 0
+    for (const change of changes) {
+      if (!change || !['insert', 'update', 'delete'].includes(change.type) || typeof change.table !== 'string') throw new Error('无效的表格修改')
+      const meta = await tableMeta(change.table)
+      if (!meta.editable || !Object.values(meta.columnEditability).some(Boolean)) throw new Error(meta.editReason || '该表不可编辑')
+      const byName = new Map(meta.columns.map(column => [column.name, column]))
+      const identity = change.identity && typeof change.identity === 'object' ? change.identity : null
+      if (change.type === 'insert') {
+        const keys = Object.keys(change.values || {}).filter(key => change.values[key] !== undefined)
+        const defaults = new Set(change.defaults || [])
+        for (const key of keys) if (!byName.has(key) || !meta.columnEditability[key]) throw new Error(`字段不可编辑：${key}`)
+        for (const key of defaults) if (!byName.has(key) || !meta.columnEditability[key]) throw new Error(`字段不可编辑：${key}`)
+        const insertKeys = keys.filter(key => !defaults.has(key))
+        const names = insertKeys.map(quoteMysql).join(', ')
+        const expressions = insertKeys.map(() => '?').join(', ')
+        const sql = insertKeys.length ? `INSERT INTO ${quoteMysql(database)}.${quoteMysql(change.table)} (${names}) VALUES (${expressions})` : `INSERT INTO ${quoteMysql(database)}.${quoteMysql(change.table)} () VALUES ()`
+        const [result] = await session.execute(sql, insertKeys.map(key => change.values[key]))
+        count += Number(result.affectedRows || 0)
+        continue
+      }
+      if (!identity || meta.primaryKey.some(key => !Object.hasOwn(identity, key)) || Object.keys(identity).length !== meta.primaryKey.length || !change.snapshot) throw new Error('记录缺少原始主键或快照，请刷新后重试')
+      const where = meta.primaryKey.map(key => `${quoteMysql(key)}=?`).join(' AND ')
+      const selectedColumns = meta.columns.map(column => quoteMysql(column.name)).join(', '); const [rows] = await session.execute(`SELECT ${selectedColumns} FROM ${quoteMysql(database)}.${quoteMysql(change.table)} WHERE ${where} FOR UPDATE`, meta.primaryKey.map(key => identity[key]))
+      const current = rows[0]
+      if (!current) throw new Error('记录已被删除，请刷新后重试')
+      if (snapshotOf(current) !== change.snapshot) throw new Error('记录已被外部修改，请刷新后重试')
+      if (change.type === 'delete') {
+        const [result] = await session.execute(`DELETE FROM ${quoteMysql(database)}.${quoteMysql(change.table)} WHERE ${where}`, meta.primaryKey.map(key => identity[key]))
+        count += Number(result.affectedRows || 0)
+      } else {
+        const keys = Object.keys(change.values || {}).filter(key => change.values[key] !== undefined)
+        const defaults = new Set(change.defaults || [])
+        for (const key of keys) if (!byName.has(key) || !meta.columnEditability[key]) throw new Error(`字段不可编辑：${key}`)
+        for (const key of defaults) if (!byName.has(key) || !meta.columnEditability[key]) throw new Error(`字段不可编辑：${key}`)
+        const assignments = [...keys.filter(key => !defaults.has(key)).map(key => `${quoteMysql(key)}=?`), ...[...defaults].map(key => `${quoteMysql(key)}=DEFAULT`)]
+        if (!assignments.length) throw new Error('没有可提交的字段修改')
+        const params = keys.filter(key => !defaults.has(key)).map(key => change.values[key])
+        const [result] = await session.execute(`UPDATE ${quoteMysql(database)}.${quoteMysql(change.table)} SET ${assignments.join(', ')} WHERE ${where}`, [...params, ...meta.primaryKey.map(key => identity[key])])
+        count += Number(result.affectedRows || 0)
+      }
+    }
+    try { await session.commit(); committed = true } catch { throw new Error('提交结果未知，请重新读取确认数据后再继续，避免重复提交') }
+    return { columns: [], rows: [], changes: count, elapsedMs: 0 }
+  } catch (error) {
+    if (!committed) await session.rollback().catch(() => undefined)
+    throw error
+  } finally { await session.end().catch(() => undefined) }
 }
 
 async function handle({ type, payload }) {
