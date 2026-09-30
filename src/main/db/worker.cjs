@@ -27,6 +27,119 @@ const jsonSafe = value => {
 const dbFor = id => { const db = databases.get(id); if (!db) throw new Error('连接已断开'); return db }
 const splitStatements = sql => { let q = null, count = 0, text = false; for (let i = 0; i < sql.length; i++) { const c = sql[i]; if (q) { if (c === q && sql[i + 1] === q) { i++; continue }; if (c === q) q = null; continue }; if (c === "'" || c === '"' || c === '`') { q = c; text = true; continue }; if (c === ';') { if (text) count++; text = false; continue }; if (!/\s/.test(c)) text = true }; if (text) count++; return count }
 
+function mysqlTokens(sql, noBackslashEscapes) {
+  const tokens = []
+  for (let i = 0; i < sql.length;) {
+    const c = sql[i]
+    if (/\s/.test(c)) { i++; continue }
+    if (c === '#' || (c === '-' && sql[i + 1] === '-' && (i + 2 === sql.length || /\s/.test(sql[i + 2])))) {
+      while (i < sql.length && sql[i] !== '\n' && sql[i] !== '\r') i++
+      continue
+    }
+    if (c === '/' && sql[i + 1] === '*') {
+      if (sql[i + 2] === '!' || sql[i + 2] === '+') throw new Error('只读模式不允许执行 MySQL 可执行注释或优化器提示')
+      const end = sql.indexOf('*/', i + 2)
+      if (end < 0) throw new Error('SQL 注释没有闭合')
+      i = end + 2
+      continue
+    }
+    if (c === "'" || c === '"' || c === '`') {
+      const quote = c
+      const kind = quote === "'" ? 'literal' : 'quoted'
+      let value = ''
+      i++
+      let closed = false
+      while (i < sql.length) {
+        const current = sql[i++]
+        if (current === quote) {
+          if (sql[i] === quote) { value += quote; i++; continue }
+          closed = true
+          break
+        }
+        if (current === '\\' && !noBackslashEscapes && quote !== '`' && i < sql.length) value += sql[i++]
+        else value += current
+      }
+      if (!closed) throw new Error('SQL 引号没有闭合')
+      tokens.push({ value, kind })
+      continue
+    }
+    if (c === ';') { tokens.push({ value: ';', kind: 'symbol' }); i++; continue }
+    const word = sql.slice(i).match(/^[\p{L}_$][\p{L}\p{N}_$]*/u)
+    if (word) { tokens.push({ value: word[0].toUpperCase(), kind: 'word' }); i += word[0].length; continue }
+    tokens.push({ value: c, kind: 'symbol' })
+    i++
+  }
+  let trailingSemicolons = 0
+  while (tokens.at(-1)?.value === ';') { tokens.pop(); trailingSemicolons++ }
+  if (trailingSemicolons > 1) throw new Error('只读模式每次只允许执行一条 SQL')
+  if (tokens.some(token => token.value === ';')) throw new Error('只读模式每次只允许执行一条 SQL')
+  if (!tokens.length) throw new Error('请输入 SQL')
+  return tokens
+}
+
+function validateMysqlReadQuery(tokens) {
+  const word = (query, index, value) => query[index]?.kind === 'word' && query[index].value === value
+  const matchingParen = (query, start) => {
+    let depth = 0
+    for (let i = start; i < query.length; i++) {
+      if (query[i].value === '(') depth++
+      else if (query[i].value === ')') { depth--; if (depth === 0) return i }
+    }
+    return -1
+  }
+  const validateSelectLocks = query => {
+    for (let i = 0; i < query.length; i++) {
+      if (query[i].kind !== 'word') continue
+      if (query[i].value === 'INTO') throw new Error('只读模式禁止 SELECT INTO 和文件导出')
+      if (['GET_LOCK', 'RELEASE_LOCK', 'RELEASE_ALL_LOCKS'].includes(query[i].value)) throw new Error('只读模式禁止获取或释放 MySQL 命名锁')
+      if (query[i].value === 'FOR' && ['UPDATE', 'SHARE'].includes(query[i + 1]?.value)) throw new Error('只读模式禁止锁定读取')
+      if (query[i].value === 'LOCK' && query[i + 1]?.value === 'IN' && query[i + 2]?.value === 'SHARE' && query[i + 3]?.value === 'MODE') throw new Error('只读模式禁止锁定读取')
+      if (query[i].value === 'NOWAIT' || (query[i].value === 'SKIP' && query[i + 1]?.value === 'LOCKED')) throw new Error('只读模式禁止锁定读取')
+    }
+  }
+  const validateQuery = query => {
+    const first = query[0]
+    if (!first || first.kind !== 'word') throw new Error('只读模式只允许常用查询语句')
+    if (first.value === 'SELECT') { validateSelectLocks(query); return }
+    if (first.value === 'WITH') {
+      let index = 1
+      if (word(query, index, 'RECURSIVE')) index++
+      while (index < query.length) {
+        if (!['word', 'quoted'].includes(query[index]?.kind)) throw new Error('只读模式无法确认此 CTE 语法')
+        index++
+        if (query[index]?.value === '(') {
+          const end = matchingParen(query, index)
+          if (end < 0) throw new Error('CTE 字段列表没有闭合')
+          index = end + 1
+        }
+        if (!word(query, index, 'AS')) throw new Error('只读模式无法确认此 CTE 语法')
+        index++
+        if (query[index]?.value !== '(') throw new Error('CTE 查询缺少括号')
+        const end = matchingParen(query, index)
+        if (end < 0) throw new Error('CTE 查询没有闭合')
+        validateQuery(query.slice(index + 1, end))
+        index = end + 1
+        if (query[index]?.value !== ',') break
+        index++
+      }
+      if (query[index]?.kind !== 'word' || query[index].value !== 'SELECT') throw new Error('只读模式中的 WITH 语句最终必须执行 SELECT')
+      validateSelectLocks(query.slice(index))
+      return
+    }
+    if (['SHOW', 'DESCRIBE', 'DESC'].includes(first.value)) return
+    if (first.value === 'EXPLAIN') {
+      if (query.some(token => token.kind === 'word' && token.value === 'ANALYZE')) throw new Error('只读模式不允许 EXPLAIN ANALYZE')
+      let index = 1
+      if (query[index]?.value === 'FORMAT') { index++; if (query[index]?.value === '=') index++; if (!['JSON', 'TRADITIONAL', 'TREE'].includes(query[index]?.value)) throw new Error('EXPLAIN 格式不受支持'); index++ }
+      if (query[index]?.kind === 'word' && query[index].value === 'TABLE') return
+      validateQuery(query.slice(index))
+      return
+    }
+    throw new Error('只读模式仅允许 SELECT、WITH 查询、SHOW、DESCRIBE 和普通 EXPLAIN；请切换到读写模式执行此语句')
+  }
+  validateQuery(tokens)
+}
+
 function sqliteTableExists(db, table) { return !!db.prepare("SELECT 1 FROM sqlite_master WHERE (type='table' OR type='view') AND name=?").get(table) }
 function sqliteExecute(db, sql) {
   const trimmed = sql.trim(); if (!trimmed) throw new Error('请输入 SQL'); if (splitStatements(trimmed) > 1) throw new Error('首版每次只执行一条 SQL，请拆分语句后重试')
@@ -75,6 +188,28 @@ function mysqlOptions(payload) {
   if (payload.tls !== false) { options.ssl = { rejectUnauthorized: true }; if (payload.caPath) options.ssl.ca = fs.readFileSync(payload.caPath) }
   return options
 }
+async function mysqlReadonlyExecute(connection, sql, database) {
+  const session = await mysql.createConnection(mysqlOptions({ ...connection.payload, database }))
+  let transactionStarted = false
+  try {
+    const [modeRows] = await session.query('SELECT @@SESSION.sql_mode AS mode')
+    const noBackslashEscapes = new Set(String(modeRows[0]?.mode || '').split(',')).has('NO_BACKSLASH_ESCAPES')
+    validateMysqlReadQuery(mysqlTokens(sql, noBackslashEscapes))
+    await session.query('START TRANSACTION READ ONLY')
+    transactionStarted = true
+    const start = performance.now()
+    const [rows, fields] = await session.query(sql)
+    const result = Array.isArray(rows)
+      ? { columns: fields?.map(field => field.name) || (rows.length ? Object.keys(rows[0]) : []), rows: rows.slice(0, 1000).map(jsonSafe), truncated: rows.length > 1000, elapsedMs: Math.round(performance.now() - start) }
+      : { columns: [], rows: [], changes: Number(rows.affectedRows || 0), elapsedMs: Math.round(performance.now() - start) }
+    await session.rollback()
+    transactionStarted = false
+    return result
+  } finally {
+    if (transactionStarted) await session.rollback().catch(() => undefined)
+    await session.end().catch(() => undefined)
+  }
+}
 async function mysqlHandle(connection, type, payload) {
   if (type === 'databases') { const [rows] = await connection.base.query('SHOW DATABASES'); return rows.map(row => row.Database).filter(Boolean) }
   if (type === 'closeSession') { const session = connection.sessions.get(payload.sessionId); if (session) await session.end(); connection.sessions.delete(payload.sessionId); connection.sessionDatabases.delete(payload.sessionId); return true }
@@ -92,14 +227,21 @@ async function mysqlHandle(connection, type, payload) {
   }
   if (type === 'schema') { if (!database) return []; const [rows] = await connection.base.query("SELECT TABLE_NAME AS name, TABLE_TYPE AS tableType FROM information_schema.tables WHERE TABLE_SCHEMA = ? ORDER BY TABLE_TYPE, TABLE_NAME", [database]); return rows.map(row => ({ name: row.name, type: row.tableType === 'VIEW' ? 'view' : 'table' })) }
   if (!database) throw new Error('请先选择一个数据库')
-  if (type === 'structure') { const meta = await tableMeta(payload.table); const { columns } = meta; const [indexes] = await connection.base.query("SELECT INDEX_NAME AS name, NON_UNIQUE AS nonUnique, COLUMN_NAME AS columnName, SEQ_IN_INDEX AS seq FROM information_schema.statistics WHERE TABLE_SCHEMA=? AND TABLE_NAME=? ORDER BY INDEX_NAME, SEQ_IN_INDEX", [database, payload.table]); const [foreignKeys] = await connection.base.query("SELECT CONSTRAINT_NAME AS name, COLUMN_NAME AS columnName, REFERENCED_TABLE_NAME AS referencedTable, REFERENCED_COLUMN_NAME AS referencedColumn FROM information_schema.key_column_usage WHERE TABLE_SCHEMA=? AND TABLE_NAME=? AND REFERENCED_TABLE_NAME IS NOT NULL", [database, payload.table]); const [created] = await connection.base.query(`SHOW CREATE TABLE ${qualified(payload.table)}`); const sql = created[0] ? (created[0]['Create Table'] || created[0]['Create View'] || null) : null; const editable = meta.editable && Object.values(meta.columnEditability).some(Boolean); return { columns: columns.map(c => ({ cid: Number(c.cid), name: c.name, type: c.type, notnull: c.IS_NULLABLE === 'NO' ? 1 : 0, dflt_value: c.COLUMN_DEFAULT, pk: c.COLUMN_KEY === 'PRI' ? 1 : 0 })), indexes: indexes.map(jsonSafe), foreignKeys: foreignKeys.map(jsonSafe), sql, editable, identity: meta.primaryKey.join(',') || null, editReason: editable ? undefined : meta.editReason || '没有可编辑字段' } }
-  if (type === 'query') { const meta = await tableMeta(payload.table); const columns = meta.columns; if (!columns.length) throw new Error('对象不存在'); const allowed = new Set(columns.map(c => c.name)); const order = payload.orderBy && allowed.has(payload.orderBy) ? ` ORDER BY ${quoteMysql(payload.orderBy)} ${payload.direction === 'desc' ? 'DESC' : 'ASC'}` : ''; const where = payload.filter ? ` WHERE ${columns.map(c => `CAST(${quoteMysql(c.name)} AS CHAR) LIKE ?`).join(' OR ')}` : ''; const filterArgs = payload.filter ? columns.map(() => `%${payload.filter}%`) : []; const limit = Math.min(Math.max(Number(payload.limit || 100), 1), 1000); const offset = Math.max(Number(payload.offset || 0), 0); const selectedColumns = columns.map(column => quoteMysql(column.name)).join(', '); const [rows] = await connection.base.query(`SELECT ${selectedColumns} FROM ${qualified(payload.table)}${where}${order} LIMIT ${limit} OFFSET ${offset}`, filterArgs); const [countRows] = await connection.base.query(`SELECT COUNT(*) AS count FROM ${qualified(payload.table)}${where}`, filterArgs); const decorated = rows.map(row => ({ ...jsonSafe(row), __sqlconnect_identity: Object.fromEntries(meta.primaryKey.map(key => [key, jsonSafe(row[key])])), __sqlconnect_snapshot: snapshotOf(row) })); const editable = meta.editable && Object.values(meta.columnEditability).some(Boolean); return { columns: rows.length ? Object.keys(rows[0]) : columns.map(c => c.name), rows: decorated, total: Number(countRows[0]?.count || 0), elapsedMs: 0, editable, editReason: editable ? undefined : meta.editReason || '没有可编辑字段', primaryKey: meta.primaryKey, columnEditability: meta.columnEditability } }
-  if (type === 'apply') return mysqlApply(connection, database, payload.changes, tableMeta)
-  if (type === 'execute') { const trimmed = payload.sql.trim(); if (!trimmed) throw new Error('请输入 SQL'); if (splitStatements(trimmed) > 1) throw new Error('首版每次只执行一条 SQL，请拆分语句后重试'); const sessionKey = payload.sessionId || 'default'; let session = connection.sessions.get(sessionKey); if (!session) { session = await mysql.createConnection(mysqlOptions({ ...connection.payload, database: payload.database || connection.database })); connection.sessions.set(sessionKey, session); if (payload.database || connection.database) connection.sessionDatabases.set(sessionKey, payload.database || connection.database) } const targetDatabase = payload.database || connection.database; const currentDatabase = connection.sessionDatabases.get(sessionKey); if (targetDatabase && currentDatabase !== targetDatabase) { await session.query(`USE ${quoteMysql(targetDatabase)}`); connection.sessionDatabases.set(sessionKey, targetDatabase) }; const start = performance.now(); const [rows, fields] = await session.query(trimmed); if (/^\s*USE\s+/i.test(trimmed)) { const match = trimmed.match(/^\s*USE\s+`?([^`;\s]+)`?/i); if (match) connection.sessionDatabases.set(sessionKey, match[1]) }; if (Array.isArray(rows)) return { columns: fields?.map(f => f.name) || (rows.length ? Object.keys(rows[0]) : []), rows: rows.slice(0, 1000).map(jsonSafe), truncated: rows.length > 1000, elapsedMs: Math.round(performance.now() - start) }; return { columns: [], rows: [], changes: Number(rows.affectedRows || 0), lastInsertRowid: rows.insertId == null ? undefined : String(rows.insertId), elapsedMs: Math.round(performance.now() - start) } }
+  if (type === 'structure') { const meta = await tableMeta(payload.table); const { columns } = meta; const [indexes] = await connection.base.query("SELECT INDEX_NAME AS name, NON_UNIQUE AS nonUnique, COLUMN_NAME AS columnName, SEQ_IN_INDEX AS seq FROM information_schema.statistics WHERE TABLE_SCHEMA=? AND TABLE_NAME=? ORDER BY INDEX_NAME, SEQ_IN_INDEX", [database, payload.table]); const [foreignKeys] = await connection.base.query("SELECT CONSTRAINT_NAME AS name, COLUMN_NAME AS columnName, REFERENCED_TABLE_NAME AS referencedTable, REFERENCED_COLUMN_NAME AS referencedColumn FROM information_schema.key_column_usage WHERE TABLE_SCHEMA=? AND TABLE_NAME=? AND REFERENCED_TABLE_NAME IS NOT NULL", [database, payload.table]); const [created] = await connection.base.query(`SHOW CREATE TABLE ${qualified(payload.table)}`); const sql = created[0] ? (created[0]['Create Table'] || created[0]['Create View'] || null) : null; const editable = connection.payload.readonly !== true && meta.editable && Object.values(meta.columnEditability).some(Boolean); return { columns: columns.map(c => ({ cid: Number(c.cid), name: c.name, type: c.type, notnull: c.IS_NULLABLE === 'NO' ? 1 : 0, dflt_value: c.COLUMN_DEFAULT, pk: c.COLUMN_KEY === 'PRI' ? 1 : 0 })), indexes: indexes.map(jsonSafe), foreignKeys: foreignKeys.map(jsonSafe), sql, editable, identity: meta.primaryKey.join(',') || null, editReason: editable ? undefined : connection.payload.readonly === true ? '连接处于只读模式' : meta.editReason || '没有可编辑字段' } }
+  if (type === 'query') { const meta = await tableMeta(payload.table); const columns = meta.columns; if (!columns.length) throw new Error('对象不存在'); const allowed = new Set(columns.map(c => c.name)); const order = payload.orderBy && allowed.has(payload.orderBy) ? ` ORDER BY ${quoteMysql(payload.orderBy)} ${payload.direction === 'desc' ? 'DESC' : 'ASC'}` : ''; const where = payload.filter ? ` WHERE ${columns.map(c => `CAST(${quoteMysql(c.name)} AS CHAR) LIKE ?`).join(' OR ')}` : ''; const filterArgs = payload.filter ? columns.map(() => `%${payload.filter}%`) : []; const limit = Math.min(Math.max(Number(payload.limit || 100), 1), 1000); const offset = Math.max(Number(payload.offset || 0), 0); const selectedColumns = columns.map(column => quoteMysql(column.name)).join(', '); const [rows] = await connection.base.query(`SELECT ${selectedColumns} FROM ${qualified(payload.table)}${where}${order} LIMIT ${limit} OFFSET ${offset}`, filterArgs); const [countRows] = await connection.base.query(`SELECT COUNT(*) AS count FROM ${qualified(payload.table)}${where}`, filterArgs); const decorated = rows.map(row => ({ ...jsonSafe(row), __sqlconnect_identity: Object.fromEntries(meta.primaryKey.map(key => [key, jsonSafe(row[key])])), __sqlconnect_snapshot: snapshotOf(row) })); const editable = connection.payload.readonly !== true && meta.editable && Object.values(meta.columnEditability).some(Boolean); return { columns: rows.length ? Object.keys(rows[0]) : columns.map(c => c.name), rows: decorated, total: Number(countRows[0]?.count || 0), elapsedMs: 0, editable, editReason: editable ? undefined : connection.payload.readonly === true ? '连接处于只读模式' : meta.editReason || '没有可编辑字段', primaryKey: meta.primaryKey, columnEditability: meta.columnEditability } }
+  if (type === 'apply') { if (connection.payload.readonly === true) throw new Error('连接处于只读模式，不能提交表格修改'); return mysqlApply(connection, database, payload.changes, tableMeta) }
+  if (type === 'execute') {
+    const trimmed = payload.sql.trim()
+    if (!trimmed) throw new Error('请输入 SQL')
+    if (connection.payload.readonly === true) return mysqlReadonlyExecute(connection, trimmed, database)
+    if (splitStatements(trimmed) > 1) throw new Error('首版每次只执行一条 SQL，请拆分语句后重试')
+    const sessionKey = payload.sessionId || 'default'; let session = connection.sessions.get(sessionKey); if (!session) { session = await mysql.createConnection(mysqlOptions({ ...connection.payload, database: payload.database || connection.database })); connection.sessions.set(sessionKey, session); if (payload.database || connection.database) connection.sessionDatabases.set(sessionKey, payload.database || connection.database) } const targetDatabase = payload.database || connection.database; const currentDatabase = connection.sessionDatabases.get(sessionKey); if (targetDatabase && currentDatabase !== targetDatabase) { await session.query(`USE ${quoteMysql(targetDatabase)}`); connection.sessionDatabases.set(sessionKey, targetDatabase) }; const start = performance.now(); const [rows, fields] = await session.query(trimmed); if (/^\s*USE\s+/i.test(trimmed)) { const match = trimmed.match(/^\s*USE\s+`?([^`;\s]+)`?/i); if (match) connection.sessionDatabases.set(sessionKey, match[1]) }; if (Array.isArray(rows)) return { columns: fields?.map(f => f.name) || (rows.length ? Object.keys(rows[0]) : []), rows: rows.slice(0, 1000).map(jsonSafe), truncated: rows.length > 1000, elapsedMs: Math.round(performance.now() - start) }; return { columns: [], rows: [], changes: Number(rows.affectedRows || 0), lastInsertRowid: rows.insertId == null ? undefined : String(rows.insertId), elapsedMs: Math.round(performance.now() - start) }
+  }
   throw new Error('未知操作')
 }
 
 async function mysqlApply(connection, database, changes, tableMeta) {
+  if (connection.payload.readonly === true) throw new Error('连接处于只读模式，不能提交表格修改')
   if (!Array.isArray(changes) || !changes.length) return { columns: [], rows: [], changes: 0, elapsedMs: 0 }
   const session = await mysql.createConnection(mysqlOptions({ ...connection.payload, database }))
   let committed = false

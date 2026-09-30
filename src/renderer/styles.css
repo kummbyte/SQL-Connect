@@ -76,3 +76,5 @@
 .search-submit:hover{color:var(--accent)}
 .result-table.no-result-columns{min-width:min(100%,320px)}
 .edit-reason{margin-top:6px;color:var(--muted);font-size:11px}.cell-edit-menu{position:fixed;z-index:20;min-width:170px;padding:5px;background:var(--surface);border:1px solid var(--line);border-radius:7px;box-shadow:var(--shadow)}.cell-edit-menu button{display:block;width:100%;padding:8px 10px;background:transparent;border-radius:4px;text-align:left;font-size:11px}.cell-edit-menu button:hover{background:var(--surface3)}
+.form-grid select{height:34px;padding:0 9px;border:1px solid var(--line);border-radius:6px;outline:0;background:var(--surface2);color:var(--text);font-size:12px}.form-grid select:focus{border-color:var(--accent)}
+.mode-indicator{display:flex;align-items:center;gap:5px;color:var(--accent)}

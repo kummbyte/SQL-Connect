@@ -1,11 +1,11 @@
 # SQL Connect 项目开发约定与踩坑记录
 
-更新日期：2026-09-30。本文适用于本项目；依赖版本、功能状态和验证结果变化后应同步更新。以实际代码和测试为准，不把最初计划或历史交付说明当作已完成功能清单。
+更新日期：2026-10-01。本文适用于本项目；依赖版本、功能状态和验证结果变化后应同步更新。以实际代码和测试为准，不把最初计划或历史交付说明当作已完成功能清单。
 
 ## 项目与执行环境
 
 - 产品：SQL Connect，类似 Navicat 的桌面数据库客户端，支持普通本地 SQLite 文件和 TCP/TLS MySQL 连接。
-- 当前应用版本：1.2.1（界面状态栏显示 1.2）。
+- 当前应用版本：1.3.1（界面状态栏显示 1.3）。
 - 项目源目录：`/Users/wuqiang/Projects/SQL-Connect`。在当前 Mac 本地安装依赖、运行测试和打包，不自动切换到 WSL。
 - 当前目标平台：Apple Silicon macOS（arm64）。Windows、SQLCipher、远程数据库不属于首版已验证范围。
 - 使用 npm，维护 `package.json` 与 `package-lock.json`；不要随意混用包管理器或删除锁文件。
@@ -153,7 +153,7 @@ process.on('message', request => handle(request))
 
 ## 功能状态与后续修改原则
 
-- 当前已验证 SQLite 连接/新建及错误恢复，以及隔离临时 MySQL 8.4 实例的连接、多数据库浏览、结构读取、分页筛选、独立 SQL 会话和 InnoDB 表数据编辑；SSH 隧道和客户端证书认证仍未实现。
+- 当前已验证 SQLite 连接/新建及错误恢复，以及隔离临时 MySQL 8.4 实例的连接、多数据库浏览、结构读取、分页筛选、独立 SQL 会话、InnoDB 表数据编辑和只读/读写模式；SSH 隧道和客户端证书认证仍未实现。
 - 连接配置按 SQLite 规范化文件路径或 MySQL 主机/端口/用户/TLS/CA 身份去重；历史重复配置启动时合并，SQLite 重复项任一只读时保留只读。
 - 当前表格写入依赖 rowid；复合主键、WITHOUT ROWID 表、生成列、BLOB 和大整数的完整编辑支持不能仅凭现有共享类型或界面推断。
 - 显式事务状态展示、停止按钮到取消 API 的完整联动、SQL 选区执行、字段级筛选等，后续开发前应检查实现与测试，不沿用早期交付描述作为完成证据。SQL 编辑器当前支持关键字 Tab 补全和 ⌘ Enter 执行全文，仍不支持选区执行。
@@ -243,3 +243,18 @@ process.on('message', request => handle(request))
 - 删除操作列原先继承通用单元格的 `text-overflow: ellipsis`，40px 列宽下垃圾桶按钮与单元格内边距挤占可用空间，浏览器因此在图标旁渲染出额外的省略号。删除单元格现在明确裁切溢出文本并去除内边距，按钮在列内居中填充。
 - `tests/app-electron.cjs` 与 `tests/app-mysql-electron.cjs` 均检查删除格没有文本溢出且按钮不超出单元格。2026-09-30 验证：`npm run typecheck`、`git diff --check`、`npm run test:app`、`npm run test:app:mysql`、`npm run dist:dir`，以及以 `dist/mac-arm64/SQL Connect.app/Contents/Resources/app.asar` 为测试目标的两套界面测试均通过。
 - 新构建标识 `com.sqlconnect.app`、版本 `1.2.1`，ASAR SHA-256 为 `dee07dde336079d5f6c81c125d00c81e021dd41df281bafec23d06ec760b1bcf`。桌面应用已完整替换并启动，标识、版本及 ASAR 校验值一致；启动后窗口正常，保存的连接配置可见且均离线。旧版完整备份在 `dist/backups/Desktop-app.before-delete-ellipsis-fix-20260930.app`。
+
+### MySQL 只读与读写模式（1.3.0）
+
+- MySQL 连接新增可持久化访问模式；新连接及缺少 `readonly` 的旧配置默认为读写，历史重复配置只要一项只读，合并结果即为只读。连接身份不包含模式，重复连接复用保存模式。详情、连接行按钮和状态栏显示当前模式。
+- 在线切换通过专用 IPC 完成：检查连接建立/在途请求、创建并验证候选 worker、先持久化成功后替换旧会话。失败会保留原 worker、模式和暂存内容；普通设置保存不能绕过在线切换入口。离线切换只更新配置。切换成功后保留标签、SQL 文本、数据库和表格视图状态，丢弃已确认放弃的暂存编辑并刷新表格/结构；SQL 文本不会自动执行。
+- 只读模式是客户端保护，不修改服务器权限。worker 拒绝全部表格提交；表数据和结构均报告不可编辑。SQL 通过独立短连接执行于 `START TRANSACTION READ ONLY` 中，随后回滚释放；词法分类只放行单条 SELECT、最终为 SELECT 的 WITH、SHOW、DESCRIBE/DESC 和普通 EXPLAIN，拒绝多语句、写语句、EXPLAIN ANALYZE、锁定读取、SELECT INTO、可执行注释和优化器提示。连接账号的 MySQL 权限仍然有效。
+- 设置回归覆盖历史缺省模式归一化、重复连接合并、离线模式保存和设置文件写入失败。真实 MySQL 8.4 worker 覆盖只读事务下查询及存储函数写入阻止、允许语法、常见写入/会话/锁定绕过拒绝、ANSI_QUOTES 与 NO_BACKSLASH_ESCAPES。BrowserWindow 覆盖只读界面、暂存确认、读写切换、模式绕过拒绝、标签/SQL/数据库上下文保留、候选连接失败回滚；SQLite UI/worker 回归保持通过。
+- 2026-09-30 验证：`npm run typecheck`、`npm test`、`npm run test:electron`、`npm run test:mysql`、`npm run test:settings`、`npm run test:app`、`npm run test:app:mysql`、`npm run dist:dir`，以及分别以 `dist/mac-arm64/SQL Connect.app/Contents/Resources/app.asar` 为目标的两套界面测试均通过。测试使用隔离 MySQL 8.4、临时 SQLite 和独立设置目录。
+- 桌面应用已从 `dist/mac-arm64/SQL Connect.app` 完整替换并启动；`com.sqlconnect.app`、版本 `1.3.0` 和 ASAR SHA-256 `0e8cd25ef53d9bbfcd53709a7d777c1642468d169400901d735570e808afe279` 一致。替换前应用未运行；启动后窗口正常，已保存连接均离线。旧版完整备份在 `dist/backups/Desktop-app.before-mysql-readonly-20260930.app`。
+
+### 只读切换为读写免确认（1.3.1）
+
+- 在线 MySQL 从读写切换为只读时，仍显示确认框，因为旧会话会结束且切换会放弃表格暂存修改；离线只更新已保存模式。从只读切换回读写时不再显示确认框，直接建立并验证新会话，然后按现有流程刷新表格和结构。候选连接失败仍保留只读模式和旧连接。
+- `tests/app-mysql-electron.cjs` 验证切换到只读会显示确认并列出未提交标签，切回读写时 `window.confirm` 不会被调用，且表格数据会重新读取。2026-10-01 验证：`npm run typecheck`、`npm run test:app:mysql`、`npm run test:app`、`npm run dist:dir`，以及以 `dist/mac-arm64/SQL Connect.app/Contents/Resources/app.asar` 为目标的两套界面测试均通过。
+- 用户保存并退出 1.3.0 后，已将新版完整复制到桌面应用路径并启动。`com.sqlconnect.app`、版本 `1.3.1` 与 ASAR SHA-256 `4bf0d4c662a64cb59dd6067a0c17d307ef6882926d75ae7656d122a1e5118b61` 已与 `dist/mac-arm64/SQL Connect.app` 核对一致；启动窗口正常，连接均离线。旧版备份在 `dist/backups/Desktop-app.before-readwrite-no-confirm-20261001.app`。

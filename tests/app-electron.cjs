@@ -34,7 +34,7 @@ app.whenReady().then(async () => {
     const js = code => window.webContents.executeJavaScript(code).catch(error => { console.error('Renderer script failed:', code, error); throw error })
     const activeTabMetrics = () => js(`(() => { const bar=document.querySelector('.tabbar'); const tab=bar?.querySelector('.tab.active'); if(!bar||!tab)return null; const b=bar.getBoundingClientRect(),t=tab.getBoundingClientRect(),left=b.left+bar.clientLeft,right=left+bar.clientWidth; return {visible:t.left>=left-1&&t.right<=right+1,scrollLeft:bar.scrollLeft,maxScroll:bar.scrollWidth-bar.clientWidth,scrollWidth:bar.scrollWidth,clientWidth:bar.clientWidth} })()`)
     await until(() => js('!!document.querySelector(".connection-menu-button")'), 'renderer mounted')
-    assert.equal(await js('document.querySelector(".statusbar")?.textContent.includes("SQL Connect 1.2")'), true)
+    assert.equal(await js('document.querySelector(".statusbar")?.textContent.includes("SQL Connect 1.3")'), true)
     assert.equal(await js('!!document.querySelector(".welcome-actions")'), false)
     assert.equal(await js('document.querySelector(".sidebar-head h2")?.textContent'), '新建连接')
     assert.equal(await js('!!document.querySelector(".quick-actions")'), false)

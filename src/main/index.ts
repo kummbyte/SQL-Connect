@@ -2,13 +2,15 @@ import { app, BrowserWindow, dialog, ipcMain, utilityProcess, safeStorage } from
 import { join, resolve } from 'node:path'
 import { copyFileSync, existsSync, mkdirSync, readFileSync, realpathSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import { WorkerClient } from './db/worker-client'
-import type { ConnectResult, Connection, MySQLConnection, PendingChange } from '../shared/types'
+import type { ConnectResult, Connection, MySQLConnection, PendingChange, SetReadonlyResult } from '../shared/types'
 
 let win: BrowserWindow
 const workers = new Map<string, WorkerClient>()
 const sessionPasswords = new Map<string, string>()
 const rawSettings = new Map<string, any>()
 const pendingConnects = new Map<string, Promise<ConnectResult>>()
+const readonlyTransitions = new Set<string>()
+const activeRequests = new Map<string, number>()
 let savedConnections: Connection[] = []
 let settingsLoaded = false
 
@@ -19,7 +21,7 @@ function normalizeSQLitePath(path: string) {
 }
 function normalizeConnection(value: any): Connection {
   if (value?.type === 'mysql') {
-    const connection: MySQLConnection = { ...value, type: 'mysql', name: String(value.name || 'MySQL 连接').trim(), host: String(value.host || '').trim(), port: Number(value.port) || 3306, user: String(value.user || ''), tls: value.tls !== false, caPath: value.caPath ? resolve(String(value.caPath)) : undefined }
+    const connection: MySQLConnection = { ...value, type: 'mysql', name: String(value.name || 'MySQL 连接').trim(), host: String(value.host || '').trim(), port: Number(value.port) || 3306, user: String(value.user || ''), readonly: value.readonly === true, tls: value.tls !== false, caPath: value.caPath ? resolve(String(value.caPath)) : undefined }
     return connection
   }
   return { ...value, type: 'sqlite', path: normalizeSQLitePath(String(value?.path || '')), readonly: !!value?.readonly }
@@ -56,6 +58,7 @@ function mergeConnectionList(values: any[]) {
     }
     const existing = entries[existingIndex]
     if (existing.connection.type === 'sqlite' && connection.type === 'sqlite') existing.connection = { ...existing.connection, readonly: existing.connection.readonly || connection.readonly }
+    if (existing.connection.type === 'mysql' && connection.type === 'mysql') existing.connection = { ...existing.connection, readonly: existing.connection.readonly || connection.readonly }
     if (!existing.raw.passwordEncrypted && raw.passwordEncrypted) existing.raw.passwordEncrypted = raw.passwordEncrypted
     if (sessionPasswords.has(connection.id) && !sessionPasswords.has(existing.connection.id)) sessionPasswords.set(existing.connection.id, sessionPasswords.get(connection.id)!)
   }
@@ -73,6 +76,7 @@ function writeSettingsFile(output: any[], backup = false) {
 function ensureSettingsLoaded() { if (!settingsLoaded) loadSettings() }
 function saveSettingsInternal(connections: Connection[], backup = false) {
   const merged = mergeConnectionList(connections)
+  const nextRaw = new Map<string, any>()
   const output = merged.connections.map((connection: any) => {
     const previous = rawSettings.get(connection.id) || {}
     const next: any = { ...connection }
@@ -81,12 +85,14 @@ function saveSettingsInternal(connections: Connection[], backup = false) {
     if (connection.type === 'mysql' && connection.rememberPassword && !safeStorage.isEncryptionAvailable()) throw new Error('当前系统无法使用钥匙串加密，不能保存 MySQL 密码')
     if (connection.type === 'mysql' && connection.rememberPassword && password && safeStorage.isEncryptionAvailable()) {
       next.passwordEncrypted = safeStorage.encryptString(password).toString('base64')
-      sessionPasswords.set(connection.id, password)
     } else if (previous.passwordEncrypted && connection.type === 'mysql' && connection.rememberPassword && !password) next.passwordEncrypted = previous.passwordEncrypted
-    rawSettings.set(connection.id, next)
+    nextRaw.set(connection.id, next)
     return next
   })
   writeSettingsFile(output, backup)
+  rawSettings.clear()
+  for (const [id, value] of nextRaw) rawSettings.set(id, value)
+  for (const connection of merged.connections) if (connection.type === 'mysql' && connection.rememberPassword && connection.password) sessionPasswords.set(connection.id, connection.password)
   savedConnections = merged.connections
   return savedConnections
 }
@@ -94,6 +100,7 @@ function deleteSavedConnection(connectionId: string) {
   ensureSettingsLoaded()
   const connection = savedConnections.find(item => item.id === connectionId)
   if (!connection) throw new Error('连接不存在或已删除')
+  if (readonlyTransitions.has(connectionId)) throw new Error('连接模式正在切换，暂时不能删除')
   if (pendingConnects.has(connectionIdentity(connection))) throw new Error('连接正在建立，请稍后再删除')
   const remaining = savedConnections.filter(item => item.id !== connectionId)
   const output = remaining.map(item => rawSettings.get(item.id) || item)
@@ -106,17 +113,26 @@ function deleteSavedConnection(connectionId: string) {
   return savedConnections
 }
 function sendWorker(connectionId: string, type: string, payload: any) {
+  if (readonlyTransitions.has(connectionId)) return Promise.reject(new Error('连接模式正在切换，请稍后重试'))
   const worker = workers.get(connectionId)
   if (!worker) return Promise.reject(new Error('连接已断开'))
+  activeRequests.set(connectionId, (activeRequests.get(connectionId) || 0) + 1)
   // Long SQL queries keep their existing execution semantics; bound connection/schema loading only.
-  return worker.request(type, payload, ['schema', 'structure'].includes(type) ? 30000 : 0)
+  return worker.request(type, payload, ['schema', 'structure'].includes(type) ? 30000 : 0).finally(() => {
+    const remaining = (activeRequests.get(connectionId) || 1) - 1
+    if (remaining) activeRequests.set(connectionId, remaining); else activeRequests.delete(connectionId)
+  })
 }
-function spawnWorker(connection: Connection) {
-  workers.get(connection.id)?.close('连接已重新建立')
+function createWorker(connection: Connection) {
   const worker = utilityProcess.fork(join(app.getAppPath(), 'src/main/db/worker.cjs'))
   const client = new WorkerClient(worker, () => {
     if (workers.get(connection.id) === client) workers.delete(connection.id)
   })
+  return client
+}
+function spawnWorker(connection: Connection) {
+  workers.get(connection.id)?.close('连接已重新建立')
+  const client = createWorker(connection)
   workers.set(connection.id, client)
   return client
 }
@@ -124,7 +140,12 @@ async function connect(connection: Connection) {
   ensureSettingsLoaded()
   const normalized = normalizeConnection(connection)
   const existing = savedConnections.find(item => connectionIdentity(item) === connectionIdentity(normalized))
-  const canonical = existing ? (existing.type === 'sqlite' ? existing : { ...existing, password: normalized.type === 'mysql' ? normalized.password : undefined, rememberPassword: (existing.type === 'mysql' && existing.rememberPassword) || (normalized.type === 'mysql' && normalized.rememberPassword) }) : normalized
+  let canonical: Connection = normalized
+  if (existing) {
+    if (existing.type === 'mysql' && normalized.type === 'mysql') canonical = { ...(existing as MySQLConnection), readonly: existing.readonly === true, password: normalized.password, rememberPassword: existing.rememberPassword || normalized.rememberPassword }
+    else canonical = existing
+  }
+  if (readonlyTransitions.has(canonical.id)) throw new Error('连接模式正在切换，请稍后重试')
   const key = connectionIdentity(canonical)
   if (workers.has(canonical.id)) return { ok: true, connection: safeConnection(canonical), reused: true }
   const running = pendingConnects.get(key)
@@ -144,6 +165,37 @@ async function connect(connection: Connection) {
   pendingConnects.set(key, request)
   try { return await request } finally { pendingConnects.delete(key) }
 }
+async function setMySQLReadonly(connectionId: string, readonly: boolean): Promise<SetReadonlyResult> {
+  ensureSettingsLoaded()
+  const current = savedConnections.find(item => item.id === connectionId)
+  if (!current || current.type !== 'mysql') throw new Error('MySQL 连接不存在')
+  const target = { ...current, readonly: !!readonly }
+  if (current.readonly === target.readonly) return { connection: target, connected: workers.has(connectionId) }
+  if (readonlyTransitions.has(connectionId)) throw new Error('连接模式正在切换')
+  if (pendingConnects.has(connectionIdentity(current))) throw new Error('连接正在建立，请稍后再切换模式')
+  if ((activeRequests.get(connectionId) || 0) > 0) throw new Error('连接正在执行操作，请等待完成后再切换模式')
+  readonlyTransitions.add(connectionId)
+  let candidate: WorkerClient | undefined
+  try {
+    const oldWorker = workers.get(connectionId)
+    if (oldWorker) {
+      const password = sessionPasswords.get(connectionId)
+      if (!password) throw new Error('请先重新连接并输入 MySQL 密码')
+      candidate = createWorker(target)
+      await candidate.request('connect', { ...target, password }, 15000)
+    }
+    const persisted = saveSettingsInternal(savedConnections.map(item => item.id === connectionId ? target : item))
+    if (candidate) {
+      workers.set(connectionId, candidate)
+      oldWorker?.close('连接模式已切换')
+      candidate = undefined
+    }
+    return { connection: persisted.find(item => item.id === connectionId) as MySQLConnection, connected: !!oldWorker }
+  } catch (error) {
+    candidate?.close('模式切换失败')
+    throw error
+  } finally { readonlyTransitions.delete(connectionId) }
+}
 function loadSettings(): Connection[] {
   const file = settingsPath()
   if (!existsSync(file)) { settingsLoaded = true; savedConnections = []; return savedConnections }
@@ -160,7 +212,15 @@ function loadSettings(): Connection[] {
 }
 function registerIpc() {
   ipcMain.handle('settings:load', () => loadSettings())
-  ipcMain.handle('settings:save', (_event, connections: Connection[]) => { ensureSettingsLoaded(); return saveSettingsInternal(connections) })
+  ipcMain.handle('settings:save', (_event, connections: Connection[]) => {
+    ensureSettingsLoaded()
+    for (const connection of connections) {
+      const saved = savedConnections.find(item => item.id === connection.id)
+      if (saved?.type === 'mysql' && connection.type === 'mysql' && workers.has(connection.id) && saved.readonly !== connection.readonly) throw new Error('MySQL 在线模式必须通过模式切换入口修改')
+      if (readonlyTransitions.has(connection.id)) throw new Error('连接模式正在切换，请稍后保存')
+    }
+    return saveSettingsInternal(connections)
+  })
   ipcMain.handle('settings:removeConnection', (_event, connectionId: string) => {
     try { deleteSavedConnection(String(connectionId)); return { ok: true } }
     catch (error) { return { ok: false, error: error instanceof Error ? error.message : String(error) } }
@@ -169,7 +229,8 @@ function registerIpc() {
   ipcMain.handle('dialog:openCertificate', async () => { const result = await dialog.showOpenDialog(win, { properties: ['openFile'], filters: [{ name: 'Certificate', extensions: ['pem', 'crt', 'cer'] }, { name: 'All files', extensions: ['*'] }] }); return result.canceled ? null : result.filePaths[0] })
   ipcMain.handle('dialog:saveFile', async () => { const result = await dialog.showSaveDialog(win, { defaultPath: 'database.sqlite', filters: [{ name: 'SQLite database', extensions: ['sqlite', 'db'] }] }); return result.canceled ? null : result.filePath })
   ipcMain.handle('db:connect', (_event, connection: Connection) => connect(connection))
-  ipcMain.handle('db:disconnect', (_event, id: string) => { workers.get(id)?.close(); sessionPasswords.delete(id); return true })
+  ipcMain.handle('db:setReadonly', (_event, id: string, readonly: boolean) => setMySQLReadonly(id, readonly))
+  ipcMain.handle('db:disconnect', (_event, id: string) => { if (readonlyTransitions.has(id)) throw new Error('连接模式正在切换，请稍后断开'); workers.get(id)?.close(); sessionPasswords.delete(id); return true })
   ipcMain.handle('db:databases', (_event, id: string) => sendWorker(id, 'databases', { connectionId: id }))
   ipcMain.handle('db:schema', (_event, id: string, database?: string) => sendWorker(id, 'schema', { connectionId: id, database }))
   ipcMain.handle('db:structure', (_event, id: string, table: string, database?: string) => sendWorker(id, 'structure', { connectionId: id, table, database }))

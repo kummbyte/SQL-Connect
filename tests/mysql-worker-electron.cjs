@@ -23,6 +23,8 @@ app.whenReady().then(async () => {
     server = spawn(mysqld, ['--no-defaults', '--datadir=' + directory, '--socket=' + socket, '--port=' + port, '--bind-address=127.0.0.1', '--skip-name-resolve', '--log-error=' + join(directory, 'error.log')], { stdio: 'ignore' })
     await waitForServer()
     execFileSync(mysql, ['--protocol=socket', '--socket', socket, '-uroot', '-e', "CREATE DATABASE `sql_connect_a`; CREATE DATABASE `sql_connect_b`; CREATE USER 'sqlconnect'@'127.0.0.1' IDENTIFIED BY 'secret'; GRANT ALL ON `sql_connect_a`.* TO 'sqlconnect'@'127.0.0.1'; GRANT ALL ON `sql_connect_b`.* TO 'sqlconnect'@'127.0.0.1'; FLUSH PRIVILEGES; CREATE TABLE `sql_connect_a`.`items` (id BIGINT PRIMARY KEY, name VARCHAR(50), amount DECIMAL(20,5)); INSERT INTO `sql_connect_a`.`items` VALUES (1,'one',12.34000); CREATE TABLE `sql_connect_a`.`pair` (a VARCHAR(30), b INT, value_text VARCHAR(30) DEFAULT 'default'); ALTER TABLE `sql_connect_a`.`pair` ADD PRIMARY KEY (a,b); INSERT INTO `sql_connect_a`.`pair` VALUES ('first',1,'original'); CREATE TABLE `sql_connect_a`.`no_key` (name VARCHAR(30)); CREATE TABLE `sql_connect_b`.`items` (id INT PRIMARY KEY, name VARCHAR(50)); INSERT INTO `sql_connect_b`.`items` VALUES (2,'two');"], { stdio: 'ignore' })
+    execFileSync(mysql, ['--protocol=socket', '--socket', socket, '-uroot', '--delimiter=//', '-e', "CREATE FUNCTION sql_connect_a.mutate_item() RETURNS INT DETERMINISTIC MODIFIES SQL DATA BEGIN UPDATE sql_connect_a.items SET name='function-side-effect' WHERE id=1; RETURN 1; END//"], { stdio: 'ignore' })
+    execFileSync(mysql, ['--protocol=socket', '--socket', socket, '-uroot', '-e', "SET GLOBAL sql_mode='ANSI_QUOTES,NO_BACKSLASH_ESCAPES'"], { stdio: 'ignore' })
     const worker = utilityProcess.fork(join(root, 'src/main/db/worker.cjs'))
     const id = 'mysql-test'
     await assert.rejects(send(worker, 'connect', { type: 'mysql', id: 'tls-failure', host: '127.0.0.1', port, user: 'sqlconnect', password: 'secret', tls: true }), /self-signed|certificate|SSL|HANDSHAKE|secure/i)
@@ -30,6 +32,23 @@ app.whenReady().then(async () => {
     const databases = await send(worker, 'databases', { connectionId: id }); assert.ok(databases.includes('sql_connect_a')); assert.ok(databases.includes('sql_connect_b'))
     const schema = await send(worker, 'schema', { connectionId: id, database: 'sql_connect_a' }); assert.equal(schema[0].name, 'items')
     const rowsA = await send(worker, 'query', { connectionId: id, database: 'sql_connect_a', table: 'items', offset: 0, limit: 100 }); assert.equal(rowsA.rows[0].name, 'one'); assert.equal(rowsA.rows[0].amount, '12.34000')
+    const readonlyId = 'mysql-readonly-test'
+    await send(worker, 'connect', { type: 'mysql', id: readonlyId, host: '127.0.0.1', port, user: 'sqlconnect', password: 'secret', tls: false, readonly: true })
+    const readonlyRows = await send(worker, 'query', { connectionId: readonlyId, database: 'sql_connect_a', table: 'items', offset: 0, limit: 100 }); assert.equal(readonlyRows.editable, false); assert.equal(readonlyRows.editReason, '连接处于只读模式')
+    const readonlyStructure = await send(worker, 'structure', { connectionId: readonlyId, database: 'sql_connect_a', table: 'items' }); assert.equal(readonlyStructure.editable, false); assert.equal(readonlyStructure.editReason, '连接处于只读模式')
+    await assert.rejects(send(worker, 'apply', { connectionId: readonlyId, database: 'sql_connect_a', changes: [{ type: 'update', table: 'items', identity: rowsA.rows[0].__sqlconnect_identity, snapshot: rowsA.rows[0].__sqlconnect_snapshot, values: { name: 'must not write' } }] }), /只读模式/)
+    const noBackslashSql = String.raw`SELECT 'a\' AS sample`
+    for (const sql of ["SELECT 'semi;colon' AS sample;", '/* ordinary comment */ SELECT 1', 'WITH c AS (SELECT 1 AS n) SELECT n FROM c', 'SHOW TABLES', 'DESCRIBE items', 'EXPLAIN SELECT id FROM items', 'EXPLAIN FORMAT=JSON SELECT id FROM items', 'SELECT "name" FROM items', noBackslashSql]) {
+      const result = await send(worker, 'execute', { connectionId: readonlyId, database: 'sql_connect_a', sessionId: `readonly-${crypto.randomUUID()}`, sql })
+      assert.ok(Array.isArray(result.rows), `read-only query should run: ${sql}`)
+      if (sql === noBackslashSql) assert.equal(result.rows[0].sample, 'a\\')
+    }
+    for (const sql of ["INSERT INTO items VALUES (2,'bad',1)", "UPDATE items SET name='bad'", 'DELETE FROM items', 'CREATE TEMPORARY TABLE local_only (id INT)', 'DROP TABLE items', 'SET @x=1', 'USE sql_connect_b', 'CALL no_such_procedure()', 'START TRANSACTION', 'COMMIT', 'EXPLAIN ANALYZE SELECT id FROM items', 'SELECT id INTO OUTFILE \'/tmp/sql-connect-readonly\' FROM items', 'SELECT id FROM items FOR UPDATE', 'WITH c AS (SELECT 1) UPDATE items SET name=\'bad\'', 'SELECT 1; SELECT 2', '/*! SELECT 1 */', 'SELECT /*+ MAX_EXECUTION_TIME(10) */ 1']) {
+      await assert.rejects(send(worker, 'execute', { connectionId: readonlyId, database: 'sql_connect_a', sql }), /只读模式|锁定读取/, `read-only SQL should reject: ${sql}`)
+    }
+    await assert.rejects(send(worker, 'execute', { connectionId: readonlyId, database: 'sql_connect_a', sql: 'SELECT mutate_item()' }), /read.only|READ ONLY|readonly/i)
+    assert.equal((await send(worker, 'query', { connectionId: id, database: 'sql_connect_a', table: 'items', offset: 0, limit: 100 })).rows[0].name, 'one')
+    await send(worker, 'disconnect', { id: readonlyId })
     const rowsB = await send(worker, 'query', { connectionId: id, database: 'sql_connect_b', table: 'items', offset: 0, limit: 100 }); assert.equal(rowsB.rows[0].name, 'two')
     const structure = await send(worker, 'structure', { connectionId: id, database: 'sql_connect_a', table: 'items' }); assert.equal(structure.editable, true); assert.match(structure.sql, /CREATE TABLE/)
     assert.equal(rowsA.editable, true); assert.deepEqual(rowsA.primaryKey, ['id']); assert.equal(rowsA.rows[0].__sqlconnect_identity.id, '1'); assert.match(rowsA.rows[0].__sqlconnect_snapshot, /^[a-f0-9]{64}$/)

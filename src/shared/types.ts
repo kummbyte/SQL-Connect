@@ -6,6 +6,7 @@ export type MySQLConnection = {
 }
 export type Connection = SQLiteConnection | MySQLConnection
 export type ConnectResult = { ok: true; connection: Connection; reused: boolean }
+export type SetReadonlyResult = { connection: MySQLConnection; connected: boolean }
 
 export type TableInfo = { name: string; type: 'table' | 'view'; sql?: string }
 export type ColumnInfo = { cid: number; name: string; type: string; notnull: number; dflt_value: string | null; pk: number }
@@ -18,6 +19,7 @@ export type SqlConnectApi = {
   dialog: { openFile: () => Promise<string | null>; openCertificate: () => Promise<string | null>; saveFile: () => Promise<string | null> }
   db: {
     connect: (connection: Connection) => Promise<ConnectResult>
+    setReadonly: (connectionId: string, readonly: boolean) => Promise<SetReadonlyResult>
     disconnect: (connectionId: string) => Promise<boolean>
     databases: (connectionId: string) => Promise<string[]>
     schema: (connectionId: string, database?: string) => Promise<TableInfo[]>
