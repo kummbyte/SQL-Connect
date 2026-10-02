@@ -1,6 +1,6 @@
 {
   "name": "sql-connect",
-  "version": "1.3.2",
+  "version": "1.4.0",
   "description": "A focused SQLite desktop client for macOS",
   "main": "out/main/index.js",
   "author": "SQL Connect",
@@ -13,7 +13,7 @@
     "dist:dir": "npm run build && electron-builder --mac --arm64 --dir",
     "dist:zip": "npm run build && electron-builder --mac --arm64 --config.mac.target=zip",
     "typecheck": "tsc --noEmit",
-    "test": "node --test tests/worker-client.test.cjs",
+    "test": "node --test tests/worker-client.test.cjs tests/sql-statements.test.cjs",
     "test:electron": "electron tests/worker-electron.cjs",
     "test:settings": "npm run build && electron tests/settings-electron.cjs",
     "test:mysql": "electron tests/mysql-worker-electron.cjs",
@@ -51,6 +51,7 @@
     "files": [
       "out",
       "src/main/db/worker.cjs",
+      "src/main/db/sql-statements.cjs",
       "package.json"
     ],
     "mac": {

@@ -2,6 +2,7 @@ const Database = require('better-sqlite3')
 const mysql = require('mysql2/promise')
 const fs = require('node:fs')
 const crypto = require('node:crypto')
+const { resolveExecutionSql } = require('./sql-statements.cjs')
 
 const databases = new Map()
 const quoteSqlite = name => `"${String(name).replaceAll('"', '""')}"`
@@ -25,9 +26,8 @@ const jsonSafe = value => {
   return value
 }
 const dbFor = id => { const db = databases.get(id); if (!db) throw new Error('连接已断开'); return db }
-const splitStatements = sql => { let q = null, count = 0, text = false; for (let i = 0; i < sql.length; i++) { const c = sql[i]; if (q) { if (c === q && sql[i + 1] === q) { i++; continue }; if (c === q) q = null; continue }; if (c === "'" || c === '"' || c === '`') { q = c; text = true; continue }; if (c === ';') { if (text) count++; text = false; continue }; if (!/\s/.test(c)) text = true }; if (text) count++; return count }
 
-function mysqlTokens(sql, noBackslashEscapes) {
+function mysqlTokens(sql, noBackslashEscapes, ansiQuotes = false) {
   const tokens = []
   for (let i = 0; i < sql.length;) {
     const c = sql[i]
@@ -56,7 +56,7 @@ function mysqlTokens(sql, noBackslashEscapes) {
           closed = true
           break
         }
-        if (current === '\\' && !noBackslashEscapes && quote !== '`' && i < sql.length) value += sql[i++]
+        if (current === '\\' && !noBackslashEscapes && quote !== '`' && !(quote === '"' && ansiQuotes) && i < sql.length) value += sql[i++]
         else value += current
       }
       if (!closed) throw new Error('SQL 引号没有闭合')
@@ -141,8 +141,8 @@ function validateMysqlReadQuery(tokens) {
 }
 
 function sqliteTableExists(db, table) { return !!db.prepare("SELECT 1 FROM sqlite_master WHERE (type='table' OR type='view') AND name=?").get(table) }
-function sqliteExecute(db, sql) {
-  const trimmed = sql.trim(); if (!trimmed) throw new Error('请输入 SQL'); if (splitStatements(trimmed) > 1) throw new Error('首版每次只执行一条 SQL，请拆分语句后重试')
+function sqliteExecute(db, sql, executionRange) {
+  const trimmed = resolveExecutionSql(sql, executionRange, { dialect: 'sqlite' }).trim()
   const start = performance.now(); const statement = db.prepare(trimmed)
   if (statement.reader) { const rows = statement.all().slice(0, 1000).map(jsonSafe); const columns = rows.length ? Object.keys(rows[0]) : statement.columns().map(c => c.name); return { columns, rows, truncated: rows.length === 1000, elapsedMs: Math.round(performance.now() - start) } }
   const result = statement.run(); return { columns: [], rows: [], changes: result.changes, lastInsertRowid: jsonSafe(result.lastInsertRowid), elapsedMs: Math.round(performance.now() - start) }
@@ -151,7 +151,7 @@ function sqliteHandle(db, type, payload) {
   if (type === 'schema') return db.prepare("SELECT name, type, sql FROM sqlite_master WHERE type IN ('table','view') AND name NOT LIKE 'sqlite_%' ORDER BY type, name").all().map(jsonSafe)
   if (type === 'structure') { if (!sqliteTableExists(db, payload.table)) throw new Error('对象不存在'); const columns = db.prepare(`PRAGMA table_info(${quoteSqlite(payload.table)})`).all().map(jsonSafe); const indexes = db.prepare(`PRAGMA index_list(${quoteSqlite(payload.table)})`).all().map(jsonSafe); const foreignKeys = db.prepare(`PRAGMA foreign_key_list(${quoteSqlite(payload.table)})`).all().map(jsonSafe); const sql = db.prepare("SELECT sql FROM sqlite_master WHERE name=?").get(payload.table)?.sql || null; const identity = columns.find(c => c.pk)?.name || (columns.length ? '__sqlconnect_rowid' : null); const objectType = db.prepare("SELECT type FROM sqlite_master WHERE name=?").get(payload.table)?.type; const editable = !db.readonly && objectType === 'table' && !!identity; return { columns, indexes, foreignKeys, sql, editable, identity, editReason: editable ? undefined : db.readonly ? '连接处于只读模式' : undefined } }
   if (type === 'query') { if (!sqliteTableExists(db, payload.table)) throw new Error('对象不存在'); const structure = db.prepare(`PRAGMA table_info(${quoteSqlite(payload.table)})`).all(); const isView = db.prepare("SELECT type FROM sqlite_master WHERE name=?").get(payload.table)?.type === 'view'; const order = payload.orderBy && structure.some(c => c.name === payload.orderBy) ? ` ORDER BY ${quoteSqlite(payload.orderBy)} ${payload.direction === 'desc' ? 'DESC' : 'ASC'}` : ''; const where = payload.filter ? ` WHERE ${structure.map(c => `CAST(${quoteSqlite(c.name)} AS TEXT) LIKE @filter`).join(' OR ')}` : ''; const from = quoteSqlite(payload.table); const select = isView ? '*' : `rowid AS __sqlconnect_rowid, *`; const stmt = db.prepare(`SELECT ${select} FROM ${from}${where}${order} LIMIT @limit OFFSET @offset`); const params = { limit: Math.min(Math.max(payload.limit || 100, 1), 1000), offset: Math.max(payload.offset || 0, 0) }; if (payload.filter) params.filter = `%${payload.filter}%`; const rows = stmt.all(params).map(jsonSafe); const total = db.prepare(`SELECT COUNT(*) AS count FROM ${from}${where}`).get(payload.filter ? { filter: `%${payload.filter}%` } : {})?.count; return { columns: rows.length ? Object.keys(rows[0]) : structure.map(c => c.name), rows, total: Number(total || 0), elapsedMs: 0, editable: !db.readonly, editReason: db.readonly ? '连接处于只读模式' : undefined } }
-  if (type === 'execute') return sqliteExecute(db, payload.sql)
+  if (type === 'execute') return sqliteExecute(db, payload.sql, payload.executionRange)
   if (type === 'apply') {
     if (!payload.changes.length) return { columns: [], rows: [], changes: 0, elapsedMs: 0 }
     const transaction = db.transaction(() => {
@@ -188,13 +188,17 @@ function mysqlOptions(payload) {
   if (payload.tls !== false) { options.ssl = { rejectUnauthorized: true }; if (payload.caPath) options.ssl.ca = fs.readFileSync(payload.caPath) }
   return options
 }
-async function mysqlReadonlyExecute(connection, sql, database) {
+async function mysqlReadonlyExecute(connection, sql, database, executionRange) {
   const session = await mysql.createConnection(mysqlOptions({ ...connection.payload, database }))
   let transactionStarted = false
   try {
     const [modeRows] = await session.query('SELECT @@SESSION.sql_mode AS mode')
-    const noBackslashEscapes = new Set(String(modeRows[0]?.mode || '').split(',')).has('NO_BACKSLASH_ESCAPES')
-    validateMysqlReadQuery(mysqlTokens(sql, noBackslashEscapes))
+    const sqlMode = String(modeRows[0]?.mode || '')
+    const modes = new Set(sqlMode.split(','))
+    const validate = text => validateMysqlReadQuery(mysqlTokens(text, modes.has('NO_BACKSLASH_ESCAPES'), modes.has('ANSI_QUOTES')))
+    if (executionRange === undefined) validate(sql)
+    sql = resolveExecutionSql(sql, executionRange, { dialect: 'mysql', sqlMode })
+    validate(sql)
     await session.query('START TRANSACTION READ ONLY')
     transactionStarted = true
     const start = performance.now()
@@ -231,11 +235,11 @@ async function mysqlHandle(connection, type, payload) {
   if (type === 'query') { const meta = await tableMeta(payload.table); const columns = meta.columns; if (!columns.length) throw new Error('对象不存在'); const allowed = new Set(columns.map(c => c.name)); const order = payload.orderBy && allowed.has(payload.orderBy) ? ` ORDER BY ${quoteMysql(payload.orderBy)} ${payload.direction === 'desc' ? 'DESC' : 'ASC'}` : ''; const where = payload.filter ? ` WHERE ${columns.map(c => `CAST(${quoteMysql(c.name)} AS CHAR) LIKE ?`).join(' OR ')}` : ''; const filterArgs = payload.filter ? columns.map(() => `%${payload.filter}%`) : []; const limit = Math.min(Math.max(Number(payload.limit || 100), 1), 1000); const offset = Math.max(Number(payload.offset || 0), 0); const selectedColumns = columns.map(column => quoteMysql(column.name)).join(', '); const [rows] = await connection.base.query(`SELECT ${selectedColumns} FROM ${qualified(payload.table)}${where}${order} LIMIT ${limit} OFFSET ${offset}`, filterArgs); const [countRows] = await connection.base.query(`SELECT COUNT(*) AS count FROM ${qualified(payload.table)}${where}`, filterArgs); const decorated = rows.map(row => ({ ...jsonSafe(row), __sqlconnect_identity: Object.fromEntries(meta.primaryKey.map(key => [key, jsonSafe(row[key])])), __sqlconnect_snapshot: snapshotOf(row) })); const editable = connection.payload.readonly !== true && meta.editable && Object.values(meta.columnEditability).some(Boolean); return { columns: rows.length ? Object.keys(rows[0]) : columns.map(c => c.name), rows: decorated, total: Number(countRows[0]?.count || 0), elapsedMs: 0, editable, editReason: editable ? undefined : connection.payload.readonly === true ? '连接处于只读模式' : meta.editReason || '没有可编辑字段', primaryKey: meta.primaryKey, columnEditability: meta.columnEditability } }
   if (type === 'apply') { if (connection.payload.readonly === true) throw new Error('连接处于只读模式，不能提交表格修改'); return mysqlApply(connection, database, payload.changes, tableMeta) }
   if (type === 'execute') {
-    const trimmed = payload.sql.trim()
-    if (!trimmed) throw new Error('请输入 SQL')
-    if (connection.payload.readonly === true) return mysqlReadonlyExecute(connection, trimmed, database)
-    if (splitStatements(trimmed) > 1) throw new Error('首版每次只执行一条 SQL，请拆分语句后重试')
-    const sessionKey = payload.sessionId || 'default'; let session = connection.sessions.get(sessionKey); if (!session) { session = await mysql.createConnection(mysqlOptions({ ...connection.payload, database: payload.database || connection.database })); connection.sessions.set(sessionKey, session); if (payload.database || connection.database) connection.sessionDatabases.set(sessionKey, payload.database || connection.database) } const targetDatabase = payload.database || connection.database; const currentDatabase = connection.sessionDatabases.get(sessionKey); if (targetDatabase && currentDatabase !== targetDatabase) { await session.query(`USE ${quoteMysql(targetDatabase)}`); connection.sessionDatabases.set(sessionKey, targetDatabase) }; const start = performance.now(); const [rows, fields] = await session.query(trimmed); if (/^\s*USE\s+/i.test(trimmed)) { const match = trimmed.match(/^\s*USE\s+`?([^`;\s]+)`?/i); if (match) connection.sessionDatabases.set(sessionKey, match[1]) }; if (Array.isArray(rows)) return { columns: fields?.map(f => f.name) || (rows.length ? Object.keys(rows[0]) : []), rows: rows.slice(0, 1000).map(jsonSafe), truncated: rows.length > 1000, elapsedMs: Math.round(performance.now() - start) }; return { columns: [], rows: [], changes: Number(rows.affectedRows || 0), lastInsertRowid: rows.insertId == null ? undefined : String(rows.insertId), elapsedMs: Math.round(performance.now() - start) }
+    if (connection.payload.readonly === true) return mysqlReadonlyExecute(connection, payload.sql, database, payload.executionRange)
+    const sessionKey = payload.sessionId || 'default'; let session = connection.sessions.get(sessionKey); if (!session) { session = await mysql.createConnection(mysqlOptions({ ...connection.payload, database: payload.database || connection.database })); connection.sessions.set(sessionKey, session); if (payload.database || connection.database) connection.sessionDatabases.set(sessionKey, payload.database || connection.database) } const targetDatabase = payload.database || connection.database; const currentDatabase = connection.sessionDatabases.get(sessionKey); if (targetDatabase && currentDatabase !== targetDatabase) { await session.query(`USE ${quoteMysql(targetDatabase)}`); connection.sessionDatabases.set(sessionKey, targetDatabase) }
+    const [modeRows] = await session.query('SELECT @@SESSION.sql_mode AS mode')
+    const trimmed = resolveExecutionSql(payload.sql, payload.executionRange, { dialect: 'mysql', sqlMode: String(modeRows[0]?.mode || '') }).trim()
+    const start = performance.now(); const [rows, fields] = await session.query(trimmed); if (/^\s*USE\s+/i.test(trimmed)) { const match = trimmed.match(/^\s*USE\s+`?([^`;\s]+)`?/i); if (match) connection.sessionDatabases.set(sessionKey, match[1]) }; if (Array.isArray(rows)) return { columns: fields?.map(f => f.name) || (rows.length ? Object.keys(rows[0]) : []), rows: rows.slice(0, 1000).map(jsonSafe), truncated: rows.length > 1000, elapsedMs: Math.round(performance.now() - start) }; return { columns: [], rows: [], changes: Number(rows.affectedRows || 0), lastInsertRowid: rows.insertId == null ? undefined : String(rows.insertId), elapsedMs: Math.round(performance.now() - start) }
   }
   throw new Error('未知操作')
 }

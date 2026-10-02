@@ -2,7 +2,7 @@ import { app, BrowserWindow, dialog, ipcMain, utilityProcess, safeStorage } from
 import { join, resolve } from 'node:path'
 import { copyFileSync, existsSync, mkdirSync, readFileSync, realpathSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import { WorkerClient } from './db/worker-client'
-import type { ConnectResult, Connection, MySQLConnection, PendingChange, SetReadonlyResult } from '../shared/types'
+import type { ConnectResult, Connection, MySQLConnection, PendingChange, SetReadonlyResult, SqlExecutionRange } from '../shared/types'
 
 let win: BrowserWindow
 const workers = new Map<string, WorkerClient>()
@@ -243,7 +243,7 @@ function registerIpc() {
   ipcMain.handle('db:schema', (_event, id: string, database?: string) => sendWorker(id, 'schema', { connectionId: id, database }))
   ipcMain.handle('db:structure', (_event, id: string, table: string, database?: string) => sendWorker(id, 'structure', { connectionId: id, table, database }))
   ipcMain.handle('db:query', (_event, id: string, table: string, options: any) => sendWorker(id, 'query', { connectionId: id, table, ...options }))
-  ipcMain.handle('db:execute', (_event, id: string, sql: string, sessionId?: string, database?: string) => sendWorker(id, 'execute', { connectionId: id, sql, sessionId, database }))
+  ipcMain.handle('db:execute', (_event, id: string, sql: string, sessionId?: string, database?: string, executionRange?: SqlExecutionRange) => sendWorker(id, 'execute', { connectionId: id, sql, sessionId, database, executionRange }))
   ipcMain.handle('db:closeSession', (_event, id: string, sessionId: string) => sendWorker(id, 'closeSession', { connectionId: id, sessionId }))
   ipcMain.handle('db:apply', (_event, id: string, changes: PendingChange[], database?: string) => sendWorker(id, 'apply', { connectionId: id, changes, database }))
   ipcMain.handle('db:cancel', (_event, id: string) => { if (readonlyTransitions.has(id)) throw new Error('连接模式正在切换，请稍后取消'); workers.get(id)?.close('操作已取消，连接已断开'); return true })

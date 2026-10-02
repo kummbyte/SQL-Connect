@@ -1,11 +1,11 @@
 # SQL Connect 项目开发约定与踩坑记录
 
-更新日期：2026-10-01。本文适用于本项目；依赖版本、功能状态和验证结果变化后应同步更新。以实际代码和测试为准，不把最初计划或历史交付说明当作已完成功能清单。
+更新日期：2026-10-02。本文适用于本项目；依赖版本、功能状态和验证结果变化后应同步更新。以实际代码和测试为准，不把最初计划或历史交付说明当作已完成功能清单。
 
 ## 项目与执行环境
 
 - 产品：SQL Connect，类似 Navicat 的桌面数据库客户端，支持普通本地 SQLite 文件和 TCP/TLS MySQL 连接。
-- 当前应用版本：1.3.2（界面状态栏显示 1.3）。
+- 当前应用版本：1.4.0（界面状态栏显示 1.4）。
 - 项目源目录：`/Users/wuqiang/Projects/SQL-Connect`。在当前 Mac 本地安装依赖、运行测试和打包，不自动切换到 WSL。
 - 当前目标平台：Apple Silicon macOS（arm64）。Windows、SQLCipher、远程数据库不属于首版已验证范围。
 - 使用 npm，维护 `package.json` 与 `package-lock.json`；不要随意混用包管理器或删除锁文件。
@@ -63,7 +63,7 @@ npm run dist
 
 - `npm test`：请求关联、数据库错误、子进程崩溃、超时、无效响应、发送失败和取消的生命周期测试。
 - `npm run test:electron`：真实 Electron utility process 创建中文路径数据库，执行 SQL、读取表、重新连接和验证错误路径。
-- `npm run test:app`：先构建，再验证连接菜单、SQLite 创建与打开、错误恢复、连接删除、侧栏与标签行为、SQL 编辑器 Tab 补全和 ⌘ Enter 执行；表格测试覆盖即时排序、筛选与分页组合、未提交修改确认，以及表数据和 SQL 结果的自动列宽、左对齐、边框收缩、横向滚动、拖动列宽和标签间保留。文件选择器返回值由测试替身提供，不能据此宣称原生对话框交互已人工验收。
+- `npm run test:app`：先构建，再验证连接菜单、SQLite 创建与打开、错误恢复、连接删除、侧栏与标签行为、SQL 编辑器 Tab 补全、选区／光标语句执行和 ⌘ Enter；表格测试覆盖即时排序、筛选与分页组合、未提交修改确认，以及表数据和 SQL 结果的自动列宽、左对齐、边框收缩、横向滚动、拖动列宽和标签间保留。文件选择器返回值由测试替身提供，不能据此宣称原生对话框交互已人工验收。
 - `npm run test:app:mysql`：在隔离 MySQL 8.4 实例中验证多数据库浏览、同名表上下文、数据库节点独立展开、连接复用与重连、连接信息折叠和删除、即时排序、表数据列宽拖动与边框收缩，以及标签栏和 SQL 编辑器行为。SQL 结果仅验证不同字段名的默认宽度及拖动手柄出现，尚未在此套件实际拖动 SQL 结果列。
 - `npm run test:settings`：使用独立配置验证 SQLite 符号链接重复合并、只读保留、MySQL 不同用户区分、配置备份、原子保存和按 ID 删除连接。
 - 涉及 worker、IPC 或原生模块的修改，不能只运行类型检查、构建或普通 Node 子进程测试；必须覆盖真实 Electron 通信。
@@ -156,7 +156,7 @@ process.on('message', request => handle(request))
 - 当前已验证 SQLite 连接/新建及错误恢复，以及隔离临时 MySQL 8.4 实例的连接、多数据库浏览、结构读取、分页筛选、独立 SQL 会话、InnoDB 表数据编辑和只读/读写模式；SSH 隧道和客户端证书认证仍未实现。
 - 连接配置按 SQLite 规范化文件路径或 MySQL 主机/端口/用户/TLS/CA 身份去重；历史重复配置启动时合并，SQLite 重复项任一只读时保留只读。
 - SQLite 表格写入使用 rowid；MySQL InnoDB 表格编辑支持单列及复合主键。SQLite WITHOUT ROWID 表、生成列、BLOB 和大整数的完整编辑支持不能仅凭共享类型或界面推断。
-- 显式事务状态展示、停止按钮到取消 API 的完整联动、SQL 选区执行、字段级筛选等，后续开发前应检查实现与测试，不沿用早期交付描述作为完成证据。SQL 编辑器当前支持关键字 Tab 补全和 ⌘ Enter 执行全文，仍不支持选区执行。
+- 显式事务状态展示、停止按钮到取消 API 的完整联动、SQL 选区执行、字段级筛选等，后续开发前应检查实现与测试，不沿用早期交付描述作为完成证据。SQL 编辑器当前支持关键字 Tab 补全，以及执行选区或光标所在的单条 SQL；按钮与 ⌘ Enter 行为一致，结果更新在当前标签。多语句选区会拒绝执行，尚不支持批量执行。
 - 变更数据写入逻辑时必须验证事务回滚、并发修改冲突与值类型保持。表格操作使用参数绑定并正确转义标识符，不拼接用户输入值到 SQL。
 - 文档修改无需重复运行应用测试；运行时修改按受影响调用链执行相应回归，并明确报告未验证范围。
 
@@ -268,3 +268,15 @@ process.on('message', request => handle(request))
 - `tests/worker-client.test.cjs` 覆盖旧 worker 关闭确认和退出等待；`tests/worker-electron.cjs` 覆盖只读 SQLite 元数据和拒绝表格写入；`tests/settings-electron.cjs` 覆盖离线模式持久化；`tests/app-electron.cjs` 覆盖确认/取消、事务回滚、标签/文本/视图保留、拒绝绕过、打开及保存失败、刷新失败重试。MySQL 保持原有候选连接失败及 BrowserWindow 模式回归。
 - 2026-10-01 验证：`npm run typecheck`、`npm test`、`npm run test:electron`、`npm run test:mysql`、`npm run test:settings`、`npm run test:app`、`npm run test:app:mysql`、`npm run dist:dir` 均通过；两套界面测试再次以 `dist/mac-arm64/SQL Connect.app/Contents/Resources/app.asar` 为目标通过。测试使用真实 Electron worker、隔离 MySQL 8.4、临时 SQLite 和独立配置目录。
 - 桌面应用已在确认连接离线后从 `dist/mac-arm64/SQL Connect.app` 完整替换并启动。桌面与产物 `com.sqlconnect.app`、版本 `1.3.2` 和 ASAR SHA-256 `9d65004b228b1d5efac0ad44aba954855ac47946bde55b58d73f4588da2c8606` 一致；启动窗口正常，用户保存的连接均离线且配置保持原位。旧版完整备份在 `dist/backups/Desktop-app.before-sqlite-mode-unify-20261001.app`。
+
+
+### SQL 选区与光标所在语句执行（1.4.0）
+
+- 点击“执行选区／执行当前语句”或按 ⌘ Enter：单个非空选区执行原选中文本，无选区执行光标所在语句。多条 SQL 选区、多个不连续选区、空白或纯注释明确提示且不执行；不提供批量执行。
+- 执行结果更新在当前 SQL 标签，保留完整编辑文本、标题、选区和编辑器滚动位置；切换标签后恢复各自选区。执行失败清除旧结果并保留编辑内容，允许重试。请求绑定发起标签的连接、数据库和 ID，切换标签不抢焦点，关闭标签或连接模式变化后忽略旧响应。
+- `db.execute` 追加可选 `executionRange: { from, to }`（UTF-16 偏移）；不传范围仍要求全文只有一条 SQL。`src/main/db/sql-statements.cjs` 统一处理范围校验、引号、标识符、注释和分号，随 worker 一起打包，不能遗漏。
+- 分号属于前一条语句，语句间空白归下一条，文档末尾只有空白时使用最后一条。空语句和纯注释尾部不回退执行其他语句。选区不自动扩展；无选区扫描遇未闭合引号／注释或 DELIMITER、存储过程、触发器等复合结构时拒绝定位。MySQL 可执行注释可能改变语法边界，因此无选区时要求明确选中单条；显式选区保留原文，原有只读检查继续拒绝可执行注释和优化器提示。
+- MySQL 读写查询复用当前标签会话，每次按实际会话的 `ANSI_QUOTES`、`NO_BACKSLASH_ESCAPES` 识别边界；只读查询继续使用原有短连接只读事务，不承诺跨次执行会话状态。保持 `multipleStatements: false`，没有放宽只读保护。稳定的读写标签会话现在可连续执行事务语句，但显式事务状态展示及提交／回滚按钮仍未实现。
+- 新增扫描器单测及共用 BrowserWindow 查询执行测试，覆盖多语句拒绝、中文／emoji 偏移、注释和字符串内分号、会话模式变化、相邻写语句无副作用、同标签结果、文本／选区／滚动保留、多选区拒绝、错误重试，以及 MySQL 后台查询与关闭标签的迟到响应。历史界面测试改用标签 ID 定位 SQL 页，不依赖执行后自动生成标题或额外结果标签。
+- 2026-10-02 验证：`npm run typecheck`、`npm test`（17 项）、`npm run test:electron`、`npm run test:mysql`、`npm run test:settings`、`npm run test:app`、`npm run test:app:mysql`、`npm run dist:dir` 均通过；两套界面测试再次以 `dist/mac-arm64/SQL Connect.app/Contents/Resources/app.asar` 为目标通过。ASAR 内 worker、扫描模块、main 和 preload 与本次构建一致，SQLite `prebuilds/darwin-arm64.node` 的 Mach-O 架构已核对。
+- 桌面应用在确认连接离线、工作区为空后正常退出，旧版完整备份至 `dist/backups/Desktop-app.before-sql-selection-20261002.app`，新版已完整替换并启动。桌面与构建产物标识 `com.sqlconnect.app`、版本 `1.4.0`、ASAR SHA-256 `630ad2f0b1b410206c241c3c5381689371c21c1c02e033c050e89e4fb09e17cf` 一致；启动窗口显示 SQL Connect 1.4，保存的三个连接均离线。连接配置文件 SHA-256 与替换前一致，用户数据库未用于测试。
