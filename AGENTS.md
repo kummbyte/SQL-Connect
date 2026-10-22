@@ -1,11 +1,11 @@
 # SQL Connect 项目开发约定与踩坑记录
 
-更新日期：2026-10-02。本文适用于本项目；依赖版本、功能状态和验证结果变化后应同步更新。以实际代码和测试为准，不把最初计划或历史交付说明当作已完成功能清单。
+更新日期：2026-10-22。本文适用于本项目；依赖版本、功能状态和验证结果变化后应同步更新。以实际代码和测试为准，不把最初计划或历史交付说明当作已完成功能清单。
 
 ## 项目与执行环境
 
 - 产品：SQL Connect，类似 Navicat 的桌面数据库客户端，支持普通本地 SQLite 文件和 TCP/TLS MySQL 连接。
-- 当前应用版本：1.4.0（界面状态栏显示 1.4）。
+- 当前应用版本：1.5.0（界面状态栏显示 1.5）。
 - 项目源目录：`/Users/wuqiang/Projects/SQL-Connect`。在当前 Mac 本地安装依赖、运行测试和打包，不自动切换到 WSL。
 - 当前目标平台：Apple Silicon macOS（arm64）。Windows、SQLCipher、远程数据库不属于首版已验证范围。
 - 使用 npm，维护 `package.json` 与 `package-lock.json`；不要随意混用包管理器或删除锁文件。
@@ -280,3 +280,29 @@ process.on('message', request => handle(request))
 - 新增扫描器单测及共用 BrowserWindow 查询执行测试，覆盖多语句拒绝、中文／emoji 偏移、注释和字符串内分号、会话模式变化、相邻写语句无副作用、同标签结果、文本／选区／滚动保留、多选区拒绝、错误重试，以及 MySQL 后台查询与关闭标签的迟到响应。历史界面测试改用标签 ID 定位 SQL 页，不依赖执行后自动生成标题或额外结果标签。
 - 2026-10-02 验证：`npm run typecheck`、`npm test`（17 项）、`npm run test:electron`、`npm run test:mysql`、`npm run test:settings`、`npm run test:app`、`npm run test:app:mysql`、`npm run dist:dir` 均通过；两套界面测试再次以 `dist/mac-arm64/SQL Connect.app/Contents/Resources/app.asar` 为目标通过。ASAR 内 worker、扫描模块、main 和 preload 与本次构建一致，SQLite `prebuilds/darwin-arm64.node` 的 Mach-O 架构已核对。
 - 桌面应用在确认连接离线、工作区为空后正常退出，旧版完整备份至 `dist/backups/Desktop-app.before-sql-selection-20261002.app`，新版已完整替换并启动。桌面与构建产物标识 `com.sqlconnect.app`、版本 `1.4.0`、ASAR SHA-256 `630ad2f0b1b410206c241c3c5381689371c21c1c02e033c050e89e4fb09e17cf` 一致；启动窗口显示 SQL Connect 1.4，保存的三个连接均离线。连接配置文件 SHA-256 与替换前一致，用户数据库未用于测试。
+
+
+### 指定页跳转（1.5.0）
+
+- SQLite、MySQL 的表和视图数据页共用分页控件，每页保持 100 行。显示“第 N 页／共 M 页”，保留上一页／下一页，新增“跳至 [页码] 页”和“跳转”按钮；点击或 Enter 提交，不在输入时查询。总页数使用当前筛选条件的总行数，空表显示第 1 页／共 1 页；整百行的末页也正确禁用下一页。SQL 执行结果沿用原有展示。
+- 仅接受 1 至总页数之间的整数，空值、小数、负数、科学计数法及越界输入显示关联输入提示且不发查询；跳转当前页不重复查询或触发暂存修改确认。复用 `setTablePage` 和现有查询 API，不增加 IPC、依赖或共享类型。
+- 跳转保留标签的筛选、排序、数据库上下文和列宽；输入框在切换标签或成功翻页后同步实际页码。跳转失败保留原页和数据，可直接重试；沿用每标签请求编号忽略迟到响应。未提交修改仍先确认，取消保留数据与暂存内容；提交或模式切换期间禁用跳转。分页区可换行，输入、按钮和错误提示适配深浅主题。
+- 新增 `tests/pagination-ui.cjs`，由 SQLite 与 MySQL 两套 BrowserWindow 测试共用，使用隔离数据库的 300 行表、视图和空表，覆盖按钮／Enter、非法输入不查询、整百行末页、筛选排序保持、标签独立、列宽保留、暂存确认／取消、提交期间禁用、查询失败重试、迟到响应和窄工作区两种主题布局。历史分页测试使用明确的上一页／下一页选择器；标签栏手动滚动测试先等待布局／ResizeObserver 完成，SQL 测试通过 CodeMirror 选区准备全文替换，避免旧 `execCommand('selectAll')` 偶发失效。
+- 2026-10-22 验证：`npm run typecheck`、`git diff --check`、源码上的 `electron tests/app-electron.cjs` 与 `electron tests/app-mysql-electron.cjs`、`npm run dist:dir` 均通过；两套完整界面回归又分别以 `SQL_CONNECT_TEST_APP_ROOT='dist/mac-arm64/SQL Connect.app/Contents/Resources/app.asar' npm run test:app` 和同目标的 `npm run test:app:mysql` 通过。ASAR 内界面资源、main、preload、worker 和 SQL 扫描模块与本次构建一致。测试使用临时 SQLite、隔离 MySQL 8.4 与独立用户配置，失败重试等负向用例的错误日志为预期结果。
+- 桌面应用在确认四个保存连接均离线、工作区为空后通过菜单正常退出，旧版完整备份至 `dist/backups/Desktop-app.before-page-jump-20261022.app`；新版完整替换并启动。桌面与构建产物的标识 `com.sqlconnect.app`、版本 `1.5.0` 和 ASAR SHA-256 `72d8320abd01aa30d93c576de4af4340830e1d71ecfc761113483be2645055cb` 一致；启动窗口显示 SQL Connect 1.5，四个保存连接均离线。连接配置文件 SHA-256 与替换前一致，用户数据库未用于测试。
+
+
+### 首页与尾页（保持 1.5.0）
+
+- 按用户要求，本次不调整应用、锁文件或界面版本号，继续使用 1.5.0／1.5。表和视图数据页新增“首页”和“尾页”，顺序为首页、尾页、上一页、当前页／总页数、下一页、指定页跳转；分别复用现有分页入口跳至第一页与当前筛选结果的最后一页，不新增 IPC 或依赖。
+- 首页禁用“首页／上一页”，尾页禁用“下一页／尾页”；空表或单页结果时四个按钮均禁用。提交或模式切换期间同样禁用。跳转保留筛选、排序、列宽及标签上下文，未提交修改沿用现有确认；取消不发查询并保留暂存内容。
+- 共用分页回归新增首尾跳转及整百行边界、筛选排序后尾页、首尾按钮的暂存确认／取消、提交期间禁用、空表／视图和窄窗口深浅主题布局检查。原有上一页测试改用 `.page-prev` 明确定位，避免新增按钮后误点击首页；测试发送原生 Enter 前显式聚焦测试窗口和渲染器。
+- 2026-10-22 验证：`npm run typecheck`、`git diff --check`、`npm run test:app`、`npm run test:app:mysql`、`npm run dist:dir`，以及以 `SQL_CONNECT_TEST_APP_ROOT='dist/mac-arm64/SQL Connect.app/Contents/Resources/app.asar'` 为目标的两套完整界面回归均通过。包内界面资源、main、preload、worker 和扫描模块与构建一致，包内版本及应用标识已核对；测试使用临时 SQLite、隔离 MySQL 8.4 和独立配置。
+- 替换前重新确认四个保存连接均离线、工作区为空，通过菜单正常退出后完整更新桌面应用。旧版备份位于 `dist/backups/Desktop-app.before-first-last-page-20261022.app`；桌面与产物的标识 `com.sqlconnect.app`、版本 `1.5.0` 和 ASAR SHA-256 `b909c1b05345ece336fe737dc0c16259019e1bf2101da797a9a3422af4e32f6f` 一致。新版已启动，窗口正常、状态栏仍为 SQL Connect 1.5，四个保存连接均离线；连接配置文件 SHA-256 与替换前相同，用户数据库未用于测试。同版本更新仍须核对包内容／ASAR 校验值，不能只根据版本号判断是否安装成功。
+
+
+### 首页与尾页相邻布局（保持 1.5.0）
+
+- 按用户要求保持首页在分页区的原位置，将尾页移到首页右侧；两者放入不拆行的按钮组，窄窗口换行时仍相邻。其他分页行为和版本号保持不变。
+- 2026-10-22 验证：`npm run typecheck`、`git diff --check`、`npm run test:app`、`npm run test:app:mysql`、`npm run dist:dir`，以及以 `SQL_CONNECT_TEST_APP_ROOT='dist/mac-arm64/SQL Connect.app/Contents/Resources/app.asar'` 为目标的两套完整界面回归均通过。沿用现有首尾翻页、分页状态、暂存确认和窄工作区深浅主题布局回归，不新增 IPC 或依赖。
+- 确认桌面连接均离线、工作区为空后正常退出，旧版完整备份至 `dist/backups/Desktop-app.before-page-button-order-20261022.app`，新版已完整替换并启动。桌面与构建产物标识 `com.sqlconnect.app`、版本 `1.5.0`、ASAR SHA-256 `698653d6fc2299ec08ca9a6272c5fdbd43f3f9e287d635856f1ef981e4a77f3a` 一致；窗口正常，状态栏仍为 SQL Connect 1.5，四个保存连接均离线。连接配置 SHA-256 与替换前相同，未用用户数据库测试。
