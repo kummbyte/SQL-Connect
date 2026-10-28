@@ -167,7 +167,11 @@ function sqliteHandle(db, type, payload) {
         if (change.original) {
           const current = db.prepare(`SELECT * FROM ${quoteSqlite(change.table)} WHERE rowid=@rowid`).get({ rowid: change.rowid })
           if (!current) throw new Error('记录已被删除，请刷新后重试')
-          for (const [key, value] of Object.entries(change.original)) if (String(jsonSafe(current[key])) !== String(value)) throw new Error('记录已被外部修改，请刷新后重试')
+          for (const [key, value] of Object.entries(change.original)) {
+            // query adds this UI identity; SELECT * does not return it.
+            if (key === '__sqlconnect_rowid') continue
+            if (!Object.hasOwn(current, key) || jsonSafe(current[key]) !== value) throw new Error('记录已被外部修改，请刷新后重试')
+          }
         }
         if (change.type === 'delete') count += db.prepare(`DELETE FROM ${quoteSqlite(change.table)} WHERE rowid=@rowid`).run({ rowid: change.rowid }).changes
         else {

@@ -39,6 +39,37 @@ app.whenReady().then(async () => {
     await assert.rejects(send('execute', { connectionId: 'test', sql: script, executionRange: { from: 0, to: script.length } }), /每次只能执行一条/)
     assert.equal((await send('execute', { connectionId: 'test', sql: 'SELECT COUNT(*) AS n FROM items; -- ; comment' })).rows[0].n, 1)
     await assert.rejects(send('execute', { connectionId: 'test', sql: 'SELECT 1', executionRange: { from: -1, to: 0 } }), /范围无效/)
+    await send('execute', { connectionId: 'test', sql: 'CREATE TABLE delete_test(id TEXT PRIMARY KEY, value, nullable TEXT)' })
+    await send('execute', { connectionId: 'test', sql: "INSERT INTO delete_test VALUES ('中文主键', 7, NULL), ('keep', '原值', NULL), ('gone', '原值', NULL)" })
+    const readDeleteRows = async () => (await send('query', { connectionId: 'test', table: 'delete_test', limit: 100 })).rows
+    const remove = row => ({ type: 'delete', table: 'delete_test', rowid: row.__sqlconnect_rowid, values: {}, original: row })
+    const apply = changes => send('apply', { connectionId: 'test', changes })
+    const [first, keep, gone] = await readDeleteRows()
+    assert.equal((await apply([remove(first)])).changes, 1)
+    assert.deepEqual((await readDeleteRows()).map(row => row.id), ['keep', 'gone'])
+    // A later conflict must roll back an earlier successful deletion in the batch.
+    await send('execute', { connectionId: 'test', sql: "UPDATE delete_test SET value='外部修改' WHERE id='gone'" })
+    await assert.rejects(apply([remove(keep), remove(gone)]), /记录已被外部修改/)
+    assert.deepEqual((await readDeleteRows()).map(row => row.id), ['keep', 'gone'])
+    assert.equal((await apply([remove((await readDeleteRows())[1])])).changes, 1)
+    await assert.rejects(apply([remove(gone)]), /记录已被删除/)
+    // Equal text representations do not mean equal SQLite values or types.
+    const nullRow = (await readDeleteRows())[0]
+    await send('execute', { connectionId: 'test', sql: "UPDATE delete_test SET nullable='null' WHERE id='keep'" })
+    await assert.rejects(apply([remove(nullRow)]), /记录已被外部修改/)
+    await send('execute', { connectionId: 'test', sql: "UPDATE delete_test SET value=7 WHERE id='keep'" })
+    const numberRow = (await readDeleteRows())[0]
+    await send('execute', { connectionId: 'test', sql: "UPDATE delete_test SET value='7' WHERE id='keep'" })
+    await assert.rejects(apply([remove(numberRow)]), /记录已被外部修改/)
+    const typedRow = (await readDeleteRows())[0]
+    assert.equal(typeof typedRow.value, 'string')
+    assert.equal((await apply([{ type: 'update', table: 'delete_test', rowid: typedRow.__sqlconnect_rowid, values: { value: 8, nullable: null }, original: { value: typedRow.value, nullable: typedRow.nullable } }])).changes, 1)
+    const updatedRow = (await readDeleteRows())[0]
+    assert.equal(updatedRow.value, 8)
+    assert.equal(updatedRow.nullable, null)
+    assert.equal((await apply([remove(updatedRow)])).changes, 1)
+    console.log('PASS: SQLite deletion ignores UI row identity, detects real/type conflicts, refreshes, and rolls back batches')
+    await send('execute', { connectionId: 'test', sql: 'DROP TABLE delete_test' })
     await send('disconnect', { id: 'test' })
     await send('connect', { id: 'test', path, readonly: true })
     assert.equal((await send('schema', { connectionId: 'test' }))[0].name, 'items')

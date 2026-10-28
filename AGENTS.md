@@ -1,6 +1,6 @@
 # SQL Connect 项目开发约定与踩坑记录
 
-更新日期：2026-10-22。本文适用于本项目；依赖版本、功能状态和验证结果变化后应同步更新。以实际代码和测试为准，不把最初计划或历史交付说明当作已完成功能清单。
+更新日期：2026-10-28。本文适用于本项目；依赖版本、功能状态和验证结果变化后应同步更新。以实际代码和测试为准，不把最初计划或历史交付说明当作已完成功能清单。
 
 ## 项目与执行环境
 
@@ -306,3 +306,12 @@ process.on('message', request => handle(request))
 - 按用户要求保持首页在分页区的原位置，将尾页移到首页右侧；两者放入不拆行的按钮组，窄窗口换行时仍相邻。其他分页行为和版本号保持不变。
 - 2026-10-22 验证：`npm run typecheck`、`git diff --check`、`npm run test:app`、`npm run test:app:mysql`、`npm run dist:dir`，以及以 `SQL_CONNECT_TEST_APP_ROOT='dist/mac-arm64/SQL Connect.app/Contents/Resources/app.asar'` 为目标的两套完整界面回归均通过。沿用现有首尾翻页、分页状态、暂存确认和窄工作区深浅主题布局回归，不新增 IPC 或依赖。
 - 确认桌面连接均离线、工作区为空后正常退出，旧版完整备份至 `dist/backups/Desktop-app.before-page-button-order-20261022.app`，新版已完整替换并启动。桌面与构建产物标识 `com.sqlconnect.app`、版本 `1.5.0`、ASAR SHA-256 `698653d6fc2299ec08ca9a6272c5fdbd43f3f9e287d635856f1ef981e4a77f3a` 一致；窗口正常，状态栏仍为 SQL Connect 1.5，四个保存连接均离线。连接配置 SHA-256 与替换前相同，未用用户数据库测试。
+
+
+### SQLite 删除误报外部修改（保持 1.5.0）
+
+- 表格查询附加的 `__sqlconnect_rowid` 是界面行定位信息，不是 `SELECT *` 返回的真实字段。旧版删除将整个界面行作为 `original` 比较，导致每次均误报“记录已被外部修改”，刷新也不能恢复。删除请求现在移除该内部字段，worker 同时兼容带有此字段的请求；真实字段仍检查冲突，不通过忽略全部原值来放行删除。
+- 先编辑再删除同一行时，以该行编辑前的字段值构造删除原值，并用删除替换已有暂存更新，避免把本地修改误认作外部写入。冲突比较保留值类型，区分 NULL 与文本 `null`、数字与同形文本。沿用现有参数绑定、行定位和事务；任一记录冲突则整批回滚，失败保留暂存操作，刷新确认后可重试。
+- `tests/worker-electron.cjs` 新增真实 utility process 删除、文本主键、NULL、真实字段修改、类型变化、已删除记录、刷新重试和整批回滚验证；`tests/app-electron.cjs` 新增实际表格删除提交、多字段编辑后删除、真实冲突后保留暂存操作、整批回滚和刷新重试覆盖。测试仅使用独立临时数据库，不操作用户实际数据。应用继续使用 1.5.0／1.5，同版本交付以包内容和 ASAR 校验值确认。
+- 2026-10-28 验证：`npm run typecheck`、`npm test`（17 项）、`npm run test:electron`、`git diff --check`、`npm run test:app`、`npm run test:app:mysql` 和 `npm run dist:dir` 均通过；两套完整界面回归又分别以 `SQL_CONNECT_TEST_APP_ROOT='dist/mac-arm64/SQL Connect.app/Contents/Resources/app.asar'` 为目标通过。新增 worker 回归在修复前复现相同错误、修复后通过；ASAR 内 worker、SQL 扫描模块、main、preload、渲染 HTML 和资源与本次构建一致。负向用例的 NOT NULL／外部修改等错误日志为预期结果。
+- 替换前确认桌面实际运行路径、五个连接均离线及工作区为空，经 ⌘Q 正常退出后将旧版完整备份至 `dist/backups/Desktop-app.before-sqlite-delete-fix-20261028.app`，再完整安装并启动桌面新版。桌面与产物标识 `com.sqlconnect.app`、版本 `1.5.0`、ASAR SHA-256 `a194b3ba6d158cafbe729772946f813c7d44dcf7b75d447557c5bec16871a292` 一致；启动后窗口正常，状态栏为 SQL Connect 1.5，五个连接均离线。连接配置 SHA-256 与替换前相同，未以用户实际数据库执行测试或删除操作。
